@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XDOX</title>
+  <!-- CSS_PLACEHOLDER -->
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Left sidebar (Notes) ─────────────── -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <span class="sidebar-title">Notes</span>
+      <select class="notes-scope-select" id="notesScopeSelect" onchange="setNotesSearchScope(this.value)" title="Which notes to search">
+        <option value="all" selected>All versions</option>
+        <option value="version">Active version only</option>
+      </select>
+      <button class="add-button" onclick="postToXojo('newNote', '')" title="New note">+</button>
+    </div>
+    <div class="tag-filter-strip" id="tagFilterStrip"></div>
+    <div class="sidebar-section" style="flex: 1; min-height: 0;">
+      <div class="sidebar-list" id="notesList"></div>
+      <div class="sidebar-search">
+        <input type="text" id="noteSearch" placeholder="Search notes…" oninput="filterNotes(this.value)">
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Chat column ─────────────────────── -->
+  <div class="chat-column">
+    <div class="chat-area" id="chatArea"></div>
+
+    <div class="input-area" id="inputArea">
+      <textarea
+        id="inputText"
+        placeholder="Ask about Xojo… (Enter to send, Shift+Enter for newline)"
+        onkeydown="handleTextareaKeydown(event)"
+        oninput="handleTextareaInput(event)"
+      ></textarea>
+      <div class="input-toolbar">
+        <div class="toolbar-left">
+          <button class="toolbar-icon" onclick="clearChat()" title="Clear conversation">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+              <path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+              <path d="M3 21v-5h5"/>
+            </svg>
+          </button>
+        </div>
+        <div class="toolbar-right">
+          <button class="toolbar-icon stop-icon" id="stopBtn" onclick="stopGeneration()" title="Stop" style="display:none;">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12" rx="2"/>
+            </svg>
+          </button>
+          <button class="btn-send" id="sendBtn" onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status bar -->
+    <div class="status-bar">
+      <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Show/hide notes">☰</button>
+      <span class="status-label">XDOX</span>
+      <span class="status-spacer"></span>
+      <span class="index-status" id="indexStatus"></span>
+      <span class="semantic-status" id="semanticStatus" title="Search quality"></span>
+      <button class="backend-status" id="backendStatus" onclick="openModelOverlay()" title="Model settings">Starting…</button>
+      <select class="status-select" id="versionSelect" onchange="selectDocsVersion(this.value)" title="Xojo documentation version" style="display:none;"></select>
+      <select class="status-select" id="themeSelect" onchange="postToXojo('setTheme', {theme: this.value}); applyTheme(this.value)" title="Color theme">
+        <option value="system" selected>System theme</option>
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ── Right panel (unused until Task 8) ── -->
+  <div class="notes-panel" style="display:none;"></div>
+
+</div>
+
+<!-- ── Model picker overlay ─────────────── -->
+<div class="model-overlay" id="modelOverlay" style="display:none;">
+  <div class="model-dialog">
+    <div class="model-dialog-header">
+      <span class="model-dialog-title">Choose a model</span>
+      <button class="model-dialog-close" id="modelOverlayClose" onclick="closeModelOverlay()" title="Close">&#x2715;</button>
+    </div>
+    <p class="model-dialog-intro">XDOX runs a local AI model on your Mac. Nothing leaves your machine.</p>
+    <p class="model-dialog-embed-note" id="embedNote" style="display:none;"></p>
+    <div class="model-list" id="modelList"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- JS_PLACEHOLDER -->
+</body>
+</html>

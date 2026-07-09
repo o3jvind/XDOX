@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Xojo — per-machine IDE state and build output
+.XDOX.xojo_uistate
+*.xojo_uistate
+Builds - XDOX/
+*.debug.app/
+*.app/
+
+# Claude Code — local (per-machine) settings/state
+.claude/
+CLAUDE.md
+
+# Backup files from inject-secrets.sh
+SecretsBuiltin.xojo_code.bak
+
+# Local debug binary — not distributed; release builds embed it via Build Automation
+Binaries/llama-server

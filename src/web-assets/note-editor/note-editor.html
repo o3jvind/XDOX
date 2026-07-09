@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Note</title>
+  <!-- CSS_PLACEHOLDER -->
+</head>
+<body>
+<div class="editor-root">
+
+  <div class="staleness-banner" id="stalenessBanner" style="display:none;">
+    <span id="stalenessText">⚠️ This note was saved with older Xojo docs. The API may have changed.</span>
+    <span class="staleness-actions">
+      <button class="banner-btn" onclick="markAsReviewed()">Mark as current</button>
+      <button class="banner-btn secondary" onclick="dismissStaleness()">Dismiss</button>
+    </span>
+  </div>
+
+  <!-- "note-toolbar", not "editor-toolbar" — the latter is claimed by EasyMDE -->
+  <div class="note-toolbar">
+    <input type="text" id="titleInput" placeholder="Note title" oninput="setDirty(true)">
+    <span class="toolbar-sep"></span>
+    <div class="segmented-control" role="tablist">
+      <button class="toggle-btn" id="btnEdit" onclick="setMode('edit')">Edit</button>
+      <button class="toggle-btn" id="btnPreview" onclick="setMode('preview')">Preview</button>
+    </div>
+    <button class="btn-save" onclick="saveNote()">Save</button>
+  </div>
+
+  <div class="tags-row">
+    <label for="tagsInput">Tags:</label>
+    <input type="text" id="tagsInput" placeholder="tag1, tag2" oninput="setDirty(true)">
+    <span class="suggested-tags" id="suggestedTags"></span>
+    <span class="relevance-control">
+      <label for="scopeSelect">Relevance:</label>
+      <select id="scopeSelect" onchange="onScopeChange()">
+        <option value="all">All versions</option>
+        <option value="version">Specific version</option>
+      </select>
+    </span>
+  </div>
+
+  <div class="panels">
+    <div class="edit-panel full" id="editPanel">
+      <textarea id="bodyInput" placeholder="Write in Markdown…" oninput="onBodyInput()"></textarea>
+    </div>
+    <div class="preview-panel hidden" id="previewPanel"></div>
+  </div>
+
+  <div class="editor-footer">
+    <button class="btn-delete" id="btnDelete" onclick="deleteNote()" style="display:none;">Delete note</button>
+    <span class="footer-meta" id="footerMeta"></span>
+  </div>
+
+</div>
+<!-- JS_PLACEHOLDER -->
+</body>
+</html>

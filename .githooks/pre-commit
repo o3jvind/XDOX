@@ -1,0 +1,12 @@
+#!/bin/bash
+# Blocks commits if SecretsBuiltin.xojo_code contains injected MBS credentials.
+# Enabled per machine with: git config core.hooksPath .githooks
+
+if git diff --cached --name-only | grep -q '^SecretsBuiltin\.xojo_code$'; then
+  if git show :SecretsBuiltin.xojo_code | grep -q 'Case "MBS\.'; then
+    echo "ERROR: SecretsBuiltin.xojo_code contains injected MBS credentials."
+    echo "Run ./restore-secrets.sh before committing."
+    exit 1
+  fi
+fi
+exit 0
