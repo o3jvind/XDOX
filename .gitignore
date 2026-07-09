@@ -17,3 +17,6 @@ SecretsBuiltin.xojo_code.bak
 
 # Local debug binary — not distributed; release builds embed it via Build Automation
 Binaries/llama-server
+
+# Release artifacts — uploaded to GitHub Releases, never committed
+XDOX-*.zip
