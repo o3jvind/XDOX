@@ -83,20 +83,32 @@ print "\nPackaging XDOX $VERSION\n"
 ZIP_PATH="$SCRIPT_DIR/XDOX-${VERSION}.zip"
 
 # --- Sign every embedded binary, inside-out, then the app -------------------
-# Nested code (dylibs, the llama-server executable) must be signed BEFORE the
-# outer app, or the app signature won't cover them and notarisation fails.
+# Nested code must be signed BEFORE the outer app, or the app signature won't
+# cover it and notarisation fails. We sign EVERY Mach-O binary anywhere in the
+# bundle — not just Frameworks/*.dylib — because Xojo ships its core
+# XojoFramework as a .framework bundle (no .dylib suffix, nested a level deeper)
+# and there may be other executables in Resources (e.g. llama-server). Missing
+# even one binary makes Apple reject the whole submission.
 
-print "[2/6] Signing embedded binaries (MBS plugins, llama-server)…"
-# Frameworks/*.dylib and the llama-server executable in Resources.
-find "$APP_PATH/Contents/Frameworks" -type f -name "*.dylib" -print0 2>/dev/null | \
-while IFS= read -r -d '' lib; do
-    codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$lib"
+print "[2/6] Signing .framework bundles…"
+# Frameworks are signed as bundles (sign the bundle dir, not the inner binary).
+find "$APP_PATH/Contents/Frameworks" -type d -name "*.framework" -print0 2>/dev/null | \
+while IFS= read -r -d '' fw; do
+    codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$fw"
 done
 
-LLAMA="$APP_PATH/Contents/Resources/llama-server"
-if [[ -f "$LLAMA" ]]; then
-    codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$LLAMA"
-fi
+print "[2/6] Signing every embedded Mach-O binary (MBS plugins, llama-server, …)…"
+# Any regular file that is actually Mach-O code, skipping anything already
+# inside a .framework (handled above). --force re-signs; harmless if repeated.
+find "$APP_PATH/Contents" -type f -print0 2>/dev/null | \
+while IFS= read -r -d '' f; do
+    case "$f" in
+        *.framework/*) continue ;;   # covered by the framework signing above
+    esac
+    if file "$f" 2>/dev/null | grep -q "Mach-O"; then
+        codesign --force --options runtime --timestamp --sign "$SIGN_HASH" "$f"
+    fi
+done
 
 print "[3/6] Signing XDOX.app…"
 codesign --force --options runtime --timestamp \
@@ -114,12 +126,32 @@ rm -f "$ZIP_PATH"
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
 print "\n[5/6] Submitting to Apple's notary service (a few minutes)…"
-xcrun notarytool submit "$ZIP_PATH" \
+# --wait returns 0 even when the result is "Invalid", so capture the submission
+# id and check the status explicitly — otherwise we'd try to staple a ticket
+# Apple never issued (the "Record not found" / Error 65 failure mode).
+SUBMIT_OUT=$(xcrun notarytool submit "$ZIP_PATH" \
     --apple-id "$APPLE_ID" \
     --team-id "$TEAM_ID" \
     --password "$APP_PASSWORD" \
     --wait \
-    --timeout 30m
+    --timeout 30m 2>&1)
+print "$SUBMIT_OUT"
+
+SUBMISSION_ID=$(print "$SUBMIT_OUT" | grep -Eo 'id: [0-9a-f-]+' | head -1 | awk '{print $2}')
+NOTARY_STATUS=$(print "$SUBMIT_OUT" | grep -E '^\s*status:' | tail -1 | awk '{print $2}')
+
+if [[ "$NOTARY_STATUS" != "Accepted" ]]; then
+    print "\n✗ Notarisation did not succeed (status: ${NOTARY_STATUS:-unknown})."
+    if [[ -n "$SUBMISSION_ID" ]]; then
+        print "\nApple's rejection log:"
+        xcrun notarytool log "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_PASSWORD" || true
+    fi
+    print "\nFix the issues above and re-run. (Secrets stub already restored.)"
+    exit 1
+fi
 
 print "\nStapling the notarisation ticket to the app…"
 xcrun stapler staple "$APP_PATH"
