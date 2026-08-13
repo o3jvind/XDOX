@@ -173,8 +173,10 @@ Public Class XDOXSession
 		  End If
 
 		  // Tokens already arrived via ReceivingProgressed; flush any tail still
-		  // in the SSE buffer, then finalize.
-		  ProcessSSEChunk("")
+		  // in the SSE buffer — isFinal=True because there is no more data
+		  // coming, so an unterminated last line is still complete, not a
+		  // partial split — then finalize.
+		  ProcessSSEChunk("", True)
 		  FinishResponse
 		End Sub
 	#tag EndMethod
@@ -186,15 +188,20 @@ Public Class XDOXSession
 		  #Pragma Unused totalBytes
 		  If Not IsResponding Then Return
 		  If newData = "" Then Return
-		  ProcessSSEChunk(newData)
+		  ProcessSSEChunk(newData, False)
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Sub ProcessSSEChunk(newData As String)
+		Private Sub ProcessSSEChunk(newData As String, isFinal As Boolean = False)
 		  // Accumulate raw bytes, emit only complete lines; an SSE event or even a
 		  // multi-byte UTF-8 character can be split across network chunks, so the
-		  // trailing partial line stays in the buffer until its newline arrives.
+		  // trailing partial line normally stays in the buffer until its newline
+		  // arrives. On the final call (isFinal, from OnContentReceived) no more
+		  // bytes are coming, so any remaining buffered text IS a complete line
+		  // even without a trailing newline — e.g. a server that closes the
+		  // connection right after its last "data: ..." line — and must be
+		  // parsed here or it's silently dropped.
 		  mSSEBuffer = mSSEBuffer + newData
 		  If mSSEBuffer = "" Then Return // stream ended cleanly on a newline; nothing to flush
 		  Var lines() As String = mSSEBuffer.Split(Chr(10))
@@ -202,8 +209,14 @@ Public Class XDOXSession
 		    mSSEBuffer = ""
 		    Return
 		  End If
-		  mSSEBuffer = lines(lines.LastIndex) // possibly-incomplete tail
-		  For i As Integer = 0 To lines.LastIndex - 1
+		  Var completeCount As Integer = lines.LastIndex - 1
+		  If isFinal Then
+		    mSSEBuffer = ""
+		    completeCount = lines.LastIndex
+		  Else
+		    mSSEBuffer = lines(lines.LastIndex) // possibly-incomplete tail
+		  End If
+		  For i As Integer = 0 To completeCount
 		    Var line As String = DefineEncoding(lines(i), Encodings.UTF8).Trim
 		    If Not line.BeginsWith("data:") Then Continue
 		    Var payload As String = line.Middle(5).Trim
