@@ -19,8 +19,9 @@ Inherits DesktopApplication
 		    System.DebugLog("MBS serial not found — add to keychain: security add-generic-password -s MBS -a Key -w YOUR_KEY")
 		  End If
 		  
+		  Retrieval.InitLock
 		  DBHelper.InitDB
-		  
+
 		  CheckDocs
 		End Sub
 	#tag EndEvent

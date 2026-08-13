@@ -2,6 +2,16 @@
 Protected Module Retrieval
 
 	#tag Method, Flags = &h0
+		Sub InitLock()
+		  // Modules have no constructor, so the CriticalSection guarding mCache
+		  // can't use an "As New" property initializer — call this once from
+		  // App.Opening (main thread, before any ChatPrepThread can start)
+		  // instead.
+		  If mCacheLock = Nil Then mCacheLock = New CriticalSection
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Function SearchChunks(query As String, limit As Integer = 4, conn As SQLiteDatabase = Nil) As RetrievalResult()
 		  // Hybrid semantic+BM25 search when the embedding server answers,
 		  // BM25-only otherwise. Scoring constants are kept identical to XMCP's
@@ -741,7 +751,7 @@ Protected Module Retrieval
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mCacheLock As New CriticalSection
+		Private mCacheLock As CriticalSection
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
