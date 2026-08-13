@@ -28,7 +28,9 @@ service accepts it.
 
 1. **Bump the version** in the Xojo IDE if needed (Project → Build Settings →
    the macOS target → *Version* fields). This becomes the app's
-   `CFBundleShortVersionString`, which the release script reads back.
+   `CFBundleShortVersionString`, which the release script reads back. Move
+   the `CHANGELOG.md` entry for this version out of "Unreleased" (or add
+   one) at the same time.
 
 2. **Run the release script:**
 
