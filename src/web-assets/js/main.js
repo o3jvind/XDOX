@@ -264,7 +264,7 @@ function setNotesSearchScope(scope) {
 // ── Backend / model management ────────────────────────────────────────────
 // Xojo calls: receiveBackendState(state, detail), receiveCatalog(catalog,
 // installed, selectedId), receiveDownloadProgress(id, pct),
-// receiveDownloadDone(id, ok, err)
+// receiveDownloadDone(id, ok, err), receiveEmbedCrashed()
 
 let modelCatalog = [];
 let modelInstalled = {};
@@ -310,6 +310,10 @@ function receiveBackendState(state, detail) {
       showToast(detail || 'The model could not be started.');
       break;
   }
+}
+
+function receiveEmbedCrashed() {
+  showToast('Semantic search stopped unexpectedly — falling back to keyword search.');
 }
 
 function openModelOverlay(auto) {

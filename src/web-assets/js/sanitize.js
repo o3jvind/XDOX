@@ -29,9 +29,10 @@ function sanitizeNode(node) {
 
     const tag = child.tagName.toLowerCase();
     if (!ALLOWED_TAGS.has(tag)) {
-      // Unwrap — keep inner text/children
+      // Unwrap — keep inner text/children, then sanitise what was moved up
       while (child.firstChild) node.insertBefore(child.firstChild, child);
       child.remove();
+      sanitizeNode(node);
       continue;
     }
 
@@ -41,14 +42,32 @@ function sanitizeNode(node) {
       if (!allowed.includes(attr.name)) child.removeAttribute(attr.name);
     }
 
-    // Safety: force external links to open safely
+    // Safety: only allow http(s)/mailto/relative links; force external links
+    // to open safely. Blocks javascript:, data:, vbscript: and obfuscated
+    // variants (case, whitespace, control chars) rather than blocklisting
+    // one exact string.
     if (tag === 'a') {
       child.setAttribute('target', '_blank');
       child.setAttribute('rel', 'noopener noreferrer');
       const href = child.getAttribute('href') || '';
-      if (href.startsWith('javascript:')) child.removeAttribute('href');
+      if (!isSafeHref(href)) child.removeAttribute('href');
     }
 
     sanitizeNode(child);
+  }
+}
+
+function isSafeHref(href) {
+  // Strip ASCII control chars (\x00-\x1F, \x7F), matching how browsers
+  // ignore them when parsing a URL scheme, so "jav\tascript:" etc. can't
+  // sneak past the protocol check below.
+  const trimmed = href.replace(/[\x00-\x1F\x7F]+/g, '').trim();
+  if (trimmed === '') return true;
+  if (trimmed.startsWith('#') || trimmed.startsWith('/')) return true;
+  try {
+    const url = new URL(trimmed, 'https://xdox.invalid/');
+    return ['http:', 'https:', 'mailto:'].includes(url.protocol);
+  } catch (e) {
+    return false;
   }
 }

@@ -136,7 +136,7 @@ Implements XDOXSessionDelegate
 
 		  Case "selectDocsVersion"
 		    Var v As String = Body.StringValue
-		    If v <> "" Then
+		    If v <> "" And IsIndexedVersion(v) Then
 		      DBHelper.SetActiveVersion(v)
 		      Retrieval.ClearCache
 		      RefreshVersions
@@ -220,6 +220,15 @@ Implements XDOXSessionDelegate
 		Sub UpdateIndexStatus(TheMessage As String)
 		  EvaluateJavaScript("updateIndexStatus(" + JSONEscape(TheMessage) + ")")
 		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function IsIndexedVersion(v As String) As Boolean
+		  For Each existing As String In DBHelper.IndexedVersions
+		    If existing = v Then Return True
+		  Next
+		  Return False
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0

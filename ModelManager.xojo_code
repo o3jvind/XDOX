@@ -270,6 +270,7 @@ Protected Module ModelManager
 		    mServerAdopted = True
 		    mServerReady = True
 		    SendBackendState("ready", "")
+		    StartAdoptedWatchdog
 		    Return
 		  ElseIf probe <> "none" Then
 		    SendBackendState("port-conflict", probe)
@@ -330,12 +331,71 @@ Protected Module ModelManager
 	#tag Method, Flags = &h21
 		Private Sub OnCrashCheckTimer(sender As Timer)
 		  #Pragma Unused sender
-		  If mServerReady Then Return
 		  If mServerTask <> Nil And Not mServerTask.isRunning Then
-		    App.AppendDebugLog("ModelManager: llama-server exited before becoming ready" + EndOfLine)
-		    StopHealthPolling
+		    Var wasReady As Boolean = mServerReady
+		    App.AppendDebugLog("ModelManager: llama-server exited" + If(wasReady, " after becoming ready", " before becoming ready") + EndOfLine)
+		    StopServer
 		    SendBackendState("crashed", "")
 		  End If
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub StartAdoptedWatchdog()
+		  // Adopted servers have no NSTaskMBS handle, so there is no stdout pipe
+		  // and no EOF signal if they die later — poll /health instead.
+		  If mAdoptedWatchdogTimer = Nil Then
+		    mAdoptedWatchdogTimer = New Timer
+		    mAdoptedWatchdogTimer.Period = kAdoptedWatchdogMS
+		    AddHandler mAdoptedWatchdogTimer.Action, AddressOf OnAdoptedWatchdogTimer
+		  End If
+		  mAdoptedWatchdogTimer.RunMode = Timer.RunModes.Multiple
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedWatchdogTimer(sender As Timer)
+		  If Not mServerAdopted Then
+		    sender.RunMode = Timer.RunModes.Off
+		    Return
+		  End If
+		  If mAdoptedWatchdogConn <> Nil Then Return // previous probe still in flight
+		  mAdoptedWatchdogConn = New URLConnection
+		  AddHandler mAdoptedWatchdogConn.ContentReceived, AddressOf OnAdoptedWatchdogReceived
+		  AddHandler mAdoptedWatchdogConn.Error, AddressOf OnAdoptedWatchdogError
+		  mAdoptedWatchdogConn.Send("GET", BaseURL() + "/health")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedWatchdogReceived(sender As URLConnection, url As String, httpStatus As Integer, content As String)
+		  #Pragma Unused url
+		  #Pragma Unused content
+		  // A stale connection from a server StopServer already tore down can
+		  // still deliver its callback after a new one has been started —
+		  // ignore anything that isn't the connection we're currently tracking.
+		  If sender <> mAdoptedWatchdogConn Then Return
+		  mAdoptedWatchdogConn = Nil
+		  If httpStatus <> 200 Then HandleAdoptedWatchdogFailure
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedWatchdogError(sender As URLConnection, err As RuntimeException)
+		  #Pragma Unused err
+		  If sender <> mAdoptedWatchdogConn Then Return
+		  mAdoptedWatchdogConn = Nil
+		  HandleAdoptedWatchdogFailure
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub HandleAdoptedWatchdogFailure()
+		  If Not mServerAdopted Then Return // already stopped by another path
+		  App.AppendDebugLog("ModelManager: adopted llama-server failed health check — treating as crashed" + EndOfLine)
+		  If mAdoptedWatchdogTimer <> Nil Then mAdoptedWatchdogTimer.RunMode = Timer.RunModes.Off
+		  StopServer
+		  SendBackendState("crashed", "")
 		End Sub
 	#tag EndMethod
 
@@ -538,12 +598,12 @@ Protected Module ModelManager
 		    // waitForDataInBackgroundAndNotify here: EOF is permanent, so that
 		    // would spin synchronously on the main thread. Instead give the process
 		    // a brief grace period via a one-shot timer before reporting a crash.
-		    If Not mServerReady Then
-		      mCrashCheckTimer = New Timer
-		      mCrashCheckTimer.Period = 500
-		      mCrashCheckTimer.RunMode = Timer.RunModes.Single
-		      AddHandler mCrashCheckTimer.Action, AddressOf OnCrashCheckTimer
-		    End If
+		    // Arm regardless of mServerReady — a server that crashes after
+		    // becoming ready needs recovery just as much as one that never came up.
+		    mCrashCheckTimer = New Timer
+		    mCrashCheckTimer.Period = 500
+		    AddHandler mCrashCheckTimer.Action, AddressOf OnCrashCheckTimer
+		    mCrashCheckTimer.RunMode = Timer.RunModes.Single
 		  End If
 		End Sub
 	#tag EndMethod
@@ -669,6 +729,9 @@ Protected Module ModelManager
 	#tag Method, Flags = &h0
 		Sub StopServer()
 		  StopHealthPolling
+		  If mAdoptedWatchdogTimer <> Nil Then mAdoptedWatchdogTimer.RunMode = Timer.RunModes.Off
+		  If mAdoptedWatchdogConn <> Nil Then mAdoptedWatchdogConn.Disconnect
+		  mAdoptedWatchdogConn = Nil
 		  If mServerTask <> Nil And mServerTask.isRunning Then
 		    mServerTask.terminate()
 		  ElseIf mServerAdopted Then
@@ -709,6 +772,7 @@ Protected Module ModelManager
 		      mEmbedAdopted = True
 		      App.AppendDebugLog("ModelManager: adopted existing embedding server on port " + kEmbedPort + EndOfLine)
 		      OnEmbedServerBecameReady
+		      StartAdoptedEmbedWatchdog
 		      Return
 		    End If
 		    App.AppendDebugLog("ModelManager: stale embedding server runs the old 2048-token regime — replacing it" + EndOfLine)
@@ -864,10 +928,12 @@ Protected Module ModelManager
 		    // Same EOF rule as the chat server: only re-arm while data flows.
 		    mEmbedStdoutHandle.waitForDataInBackgroundAndNotify
 		  Else
+		    // Arm regardless of mEmbedReady — a crash after becoming ready needs
+		    // recovery/notification just as much as one that never came up.
 		    mEmbedCrashCheckTimer = New Timer
 		    mEmbedCrashCheckTimer.Period = 500
-		    mEmbedCrashCheckTimer.RunMode = Timer.RunModes.Single
 		    AddHandler mEmbedCrashCheckTimer.Action, AddressOf OnEmbedCrashCheckTimer
+		    mEmbedCrashCheckTimer.RunMode = Timer.RunModes.Single
 		  End If
 		End Sub
 	#tag EndMethod
@@ -877,7 +943,69 @@ Protected Module ModelManager
 		  #Pragma Unused sender
 		  If mEmbedTask <> Nil And Not mEmbedTask.isRunning Then
 		    App.AppendDebugLog("ModelManager: embedding server exited — semantic search degrades to keyword-only" + EndOfLine)
+		    StopEmbedServer
+		    Retrieval.NotifySemanticState
+		    SendToJS("receiveEmbedCrashed();")
 		  End If
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub StartAdoptedEmbedWatchdog()
+		  // Adopted embedding servers have no NSTaskMBS handle either — poll
+		  // /health so a later crash is still detected.
+		  If mAdoptedEmbedWatchdogTimer = Nil Then
+		    mAdoptedEmbedWatchdogTimer = New Timer
+		    mAdoptedEmbedWatchdogTimer.Period = kAdoptedWatchdogMS
+		    AddHandler mAdoptedEmbedWatchdogTimer.Action, AddressOf OnAdoptedEmbedWatchdogTimer
+		  End If
+		  mAdoptedEmbedWatchdogTimer.RunMode = Timer.RunModes.Multiple
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedEmbedWatchdogTimer(sender As Timer)
+		  If Not mEmbedAdopted Then
+		    sender.RunMode = Timer.RunModes.Off
+		    Return
+		  End If
+		  If mAdoptedEmbedWatchdogConn <> Nil Then Return // previous probe still in flight
+		  mAdoptedEmbedWatchdogConn = New URLConnection
+		  AddHandler mAdoptedEmbedWatchdogConn.ContentReceived, AddressOf OnAdoptedEmbedWatchdogReceived
+		  AddHandler mAdoptedEmbedWatchdogConn.Error, AddressOf OnAdoptedEmbedWatchdogError
+		  mAdoptedEmbedWatchdogConn.Send("GET", EmbedBaseURL() + "/health")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedEmbedWatchdogReceived(sender As URLConnection, url As String, httpStatus As Integer, content As String)
+		  #Pragma Unused url
+		  #Pragma Unused content
+		  // Ignore a stale connection from a server StopEmbedServer already tore
+		  // down — see OnAdoptedWatchdogReceived for the same race on the chat side.
+		  If sender <> mAdoptedEmbedWatchdogConn Then Return
+		  mAdoptedEmbedWatchdogConn = Nil
+		  If httpStatus <> 200 Then HandleAdoptedEmbedWatchdogFailure
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedEmbedWatchdogError(sender As URLConnection, err As RuntimeException)
+		  #Pragma Unused err
+		  If sender <> mAdoptedEmbedWatchdogConn Then Return
+		  mAdoptedEmbedWatchdogConn = Nil
+		  HandleAdoptedEmbedWatchdogFailure
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub HandleAdoptedEmbedWatchdogFailure()
+		  If Not mEmbedAdopted Then Return // already stopped by another path
+		  App.AppendDebugLog("ModelManager: adopted embedding server failed health check — treating as crashed" + EndOfLine)
+		  If mAdoptedEmbedWatchdogTimer <> Nil Then mAdoptedEmbedWatchdogTimer.RunMode = Timer.RunModes.Off
+		  StopEmbedServer
+		  Retrieval.NotifySemanticState
+		  SendToJS("receiveEmbedCrashed();")
 		End Sub
 	#tag EndMethod
 
@@ -908,7 +1036,10 @@ Protected Module ModelManager
 	#tag Method, Flags = &h0
 		Sub StopEmbedServer()
 		  If mEmbedHealthTimer <> Nil Then mEmbedHealthTimer.RunMode = Timer.RunModes.Off
+		  If mAdoptedEmbedWatchdogTimer <> Nil Then mAdoptedEmbedWatchdogTimer.RunMode = Timer.RunModes.Off
 		  mEmbedHealthConn = Nil
+		  If mAdoptedEmbedWatchdogConn <> Nil Then mAdoptedEmbedWatchdogConn.Disconnect
+		  mAdoptedEmbedWatchdogConn = Nil
 		  If mEmbedTask <> Nil And mEmbedTask.isRunning Then
 		    mEmbedTask.terminate()
 		  ElseIf mEmbedAdopted Then
@@ -981,6 +1112,22 @@ Protected Module ModelManager
 
 	#tag Property, Flags = &h21
 		Private mCrashCheckTimer As Timer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mAdoptedWatchdogTimer As Timer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mAdoptedEmbedWatchdogTimer As Timer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mAdoptedWatchdogConn As URLConnection
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mAdoptedEmbedWatchdogConn As URLConnection
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1068,6 +1215,9 @@ Protected Module ModelManager
 	#tag EndConstant
 
 	#tag Constant, Name = kDownloadStallSeconds, Type = Double, Dynamic = False, Default = \"90", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kAdoptedWatchdogMS, Type = Double, Dynamic = False, Default = \"5000", Scope = Private
 	#tag EndConstant
 
 	#tag Constant, Name = kEmbedPort, Type = String, Dynamic = False, Default = \"8089", Scope = Public

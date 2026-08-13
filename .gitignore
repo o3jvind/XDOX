@@ -20,3 +20,4 @@ Binaries/llama-server
 
 # Release artifacts — uploaded to GitHub Releases, never committed
 XDOX-*.zip
+XDOX-*.dmg
