@@ -16,10 +16,16 @@ Protected Module Retrieval
 		  Var activeVersion As String = DBHelper.GetActiveVersion
 
 		  Var cacheKey As String = activeVersion + "|" + query + "|" + limit.ToString
+
+		  Var generationAtMiss As Integer
+		  mCacheLock.Enter
 		  If mCache <> Nil And mCache.HasKey(cacheKey) Then
 		    Var cached() As RetrievalResult = mCache.Value(cacheKey)
+		    mCacheLock.Leave
 		    Return cached
 		  End If
+		  generationAtMiss = mCacheGeneration
+		  mCacheLock.Leave
 
 		  Var queryEmb As MemoryBlock = GetQueryEmbedding(query)
 
@@ -34,9 +40,17 @@ Protected Module Retrieval
 		    If results.Count = 0 Then results = KeywordSearchChunks(query, limit, db, activeVersion)
 		  End If
 
-		  If mCache = Nil Then mCache = New Dictionary
-		  If mCache.Count >= kCacheMaxEntries Then mCache = New Dictionary
-		  mCache.Value(cacheKey) = results
+		  mCacheLock.Enter
+		  // A ClearCache (reindex/version/model switch) may have landed while
+		  // the search above was running against the now-stale index — only
+		  // cache the result if the generation is still the one we searched
+		  // under, so a stale result can't be written back after invalidation.
+		  If mCacheGeneration = generationAtMiss Then
+		    If mCache = Nil Then mCache = New Dictionary
+		    If mCache.Count >= kCacheMaxEntries Then mCache = New Dictionary
+		    mCache.Value(cacheKey) = results
+		  End If
+		  mCacheLock.Leave
 		  Return results
 		End Function
 	#tag EndMethod
@@ -470,12 +484,25 @@ Protected Module Retrieval
 		Private Function GetQueryEmbedding(query As String) As MemoryBlock
 		  // One embedding per user message even though both SearchChunks and
 		  // SearchNotes need it — single-entry cache keyed on the query text.
+		  // Concurrent chat requests (e.g. stop-then-resend) can run overlapping
+		  // ChatPrepThread workers, so this single-entry cache needs the same
+		  // lock as mCache even though nothing here touches the main thread.
 		  If Not ModelManager.EmbedServerReady Then Return Nil
-		  If query = mLastEmbQuery And mLastEmb <> Nil Then Return mLastEmb
+
+		  mCacheLock.Enter
+		  If query = mLastEmbQuery And mLastEmb <> Nil Then
+		    Var hit As MemoryBlock = mLastEmb
+		    mCacheLock.Leave
+		    Return hit
+		  End If
+		  mCacheLock.Leave
+
 		  Var emb As MemoryBlock = Embedder.FetchEmbedding(query, 5)
 		  If emb <> Nil Then
+		    mCacheLock.Enter
 		    mLastEmbQuery = query
 		    mLastEmb = emb
+		    mCacheLock.Leave
 		  End If
 		  Return emb
 		End Function
@@ -601,7 +628,17 @@ Protected Module Retrieval
 
 	#tag Method, Flags = &h0
 		Sub ClearCache()
+		  // Called from the main thread (reindex/version-switch/model-switch)
+		  // while SearchChunks may be reading or writing mCache on the
+		  // ChatPrepThread worker — same lock protects both. Bumping the
+		  // generation here (not just nil-ing mCache) lets an in-flight
+		  // SearchChunks that missed the cache before this call detect that
+		  // its result is now stale and skip writing it back — see the
+		  // generationAtMiss check in SearchChunks.
+		  mCacheLock.Enter
 		  mCache = Nil
+		  mCacheGeneration = mCacheGeneration + 1
+		  mCacheLock.Leave
 		End Sub
 	#tag EndMethod
 
@@ -701,6 +738,14 @@ Protected Module Retrieval
 
 	#tag Property, Flags = &h21
 		Private mCache As Dictionary
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mCacheLock As New CriticalSection
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mCacheGeneration As Integer
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
