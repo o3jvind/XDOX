@@ -54,6 +54,27 @@ Protected Module ModelManager
 		End Function
 	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Function IsModelBusy(modelId As String) As Boolean
+		  // True while modelId is downloading OR its .part is being hashed —
+		  // covers both dictionaries so a second download can't start while
+		  // VerifyThenInstall still has the file from the first one open.
+		  If mDownloads <> Nil Then
+		    For Each key As Variant In mDownloads.Keys
+		      Var info As Dictionary = Dictionary(mDownloads.Value(URLConnection(key)))
+		      If info.Lookup("modelId", "") = modelId Then Return True
+		    Next
+		  End If
+		  If mVerifying <> Nil Then
+		    For Each key As Variant In mVerifying.Keys
+		      Var info As Dictionary = Dictionary(mVerifying.Value(Shell(key)))
+		      If info.Lookup("modelId", "") = modelId Then Return True
+		    Next
+		  End If
+		  Return False
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h0
 		Sub EnsureEmbeddingModel()
 		  // The embedding model is a fixed dependency (768-dim nomic), not a
@@ -62,10 +83,7 @@ Protected Module ModelManager
 		  If f <> Nil And f.Exists And f.Length > 0 Then Return
 
 		  If mDownloads = Nil Then mDownloads = New Dictionary
-		  For Each key As Variant In mDownloads.Keys
-		    Var info As Dictionary = Dictionary(mDownloads.Value(URLConnection(key)))
-		    If info.Lookup("modelId", "") = "embedding" Then Return // already downloading
-		  Next
+		  If IsModelBusy("embedding") Then Return // already downloading or verifying
 
 		  App.AppendDebugLog("ModelManager: downloading embedding model from HF" + EndOfLine)
 		  Var url As String = kHFBase + "/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf"
@@ -80,6 +98,7 @@ Protected Module ModelManager
 		  info.Value("modelId") = "embedding"
 		  info.Value("filename") = Embedder.kEmbedModelFile
 		  info.Value("bytes") = CType(146146432, Int64)
+		  info.Value("sha256") = "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7"
 		  info.Value("lastProgressTick") = System.Ticks
 		  mDownloads.Value(conn) = info
 
@@ -90,20 +109,46 @@ Protected Module ModelManager
 
 	#tag Method, Flags = &h0
 		Sub CancelDownload(modelId As String)
-		  If mDownloads = Nil Then Return
-		  For Each key As Variant In mDownloads.Keys
-		    Var conn As URLConnection = URLConnection(key)
-		    Var info As Dictionary = Dictionary(mDownloads.Value(conn))
-		    If info.Lookup("modelId", "") = modelId Then
-		      conn.Disconnect()
-		      Var filename As String = info.Lookup("filename", "")
-		      Var part As FolderItem = ModelsFolder().Child(filename + ".part")
-		      If part <> Nil And part.Exists Then part.Delete
-		      mDownloads.Remove(conn)
-		      SendToJS("receiveDownloadDone(" + JSEscape(modelId) + ",false,""cancelled"");")
-		      Return
-		    End If
-		  Next
+		  If mDownloads <> Nil Then
+		    For Each key As Variant In mDownloads.Keys
+		      Var conn As URLConnection = URLConnection(key)
+		      Var info As Dictionary = Dictionary(mDownloads.Value(conn))
+		      If info.Lookup("modelId", "") = modelId Then
+		        // Remove before Disconnect: Disconnect can trigger Error
+		        // (possibly synchronously), and OnDownloadError no-ops once the
+		        // key is gone rather than reporting a spurious failure and
+		        // double-sending receiveDownloadDone.
+		        mDownloads.Remove(conn)
+		        conn.Disconnect()
+		        Var filename As String = info.Lookup("filename", "")
+		        Var part As FolderItem = ModelsFolder().Child(filename + ".part")
+		        If part <> Nil And part.Exists Then part.Delete
+		        SendToJS("receiveDownloadDone(" + JSEscape(modelId) + ",false,""cancelled"");")
+		        Return
+		      End If
+		    Next
+		  End If
+
+		  // The download itself may already be complete and the file handed off
+		  // to the shasum verification pass (mVerifying) — the Cancel button in
+		  // the UI has no way to know which phase it's in, so check both.
+		  If mVerifying <> Nil Then
+		    For Each key As Variant In mVerifying.Keys
+		      Var sh As Shell = Shell(key)
+		      Var info As Dictionary = Dictionary(mVerifying.Value(sh))
+		      If info.Lookup("modelId", "") = modelId Then
+		        // Remove before Close: Close triggers Completed (possibly
+		        // synchronously), and OnHashCompleted no-ops once the key is
+		        // gone rather than reporting a spurious "verify failed".
+		        mVerifying.Remove(sh)
+		        If sh.IsRunning Then sh.Close
+		        Var file As FolderItem = FolderItem(info.Lookup("file", Nil))
+		        If file <> Nil And file.Exists Then file.Delete
+		        SendToJS("receiveDownloadDone(" + JSEscape(modelId) + ",false,""cancelled"");")
+		        Return
+		      End If
+		    Next
+		  End If
 		End Sub
 	#tag EndMethod
 
@@ -111,16 +156,40 @@ Protected Module ModelManager
 		Sub CancelAllDownloads()
 		  // Called from App.Closing so a quit during a download doesn't leave a
 		  // half-written .part file (or an orphaned URLConnection) behind.
-		  If mDownloads = Nil Then Return
-		  For Each key As Variant In mDownloads.Keys
-		    Var conn As URLConnection = URLConnection(key)
-		    Var info As Dictionary = Dictionary(mDownloads.Value(conn))
-		    conn.Disconnect()
-		    Var filename As String = info.Lookup("filename", "")
-		    Var part As FolderItem = ModelsFolder().Child(filename + ".part")
-		    If part <> Nil And part.Exists Then part.Delete
-		  Next
-		  mDownloads = New Dictionary
+		  // Swap in a fresh dictionary before disconnecting any connection:
+		  // Disconnect can trigger Error (possibly synchronously), and
+		  // OnDownloadError's own Remove(sender) must land on the old,
+		  // already-abandoned dictionary, not the one this loop is iterating.
+		  If mDownloads <> Nil Then
+		    Var pendingDownloads As Dictionary = mDownloads
+		    mDownloads = New Dictionary
+		    For Each key As Variant In pendingDownloads.Keys
+		      Var conn As URLConnection = URLConnection(key)
+		      Var info As Dictionary = Dictionary(pendingDownloads.Value(conn))
+		      conn.Disconnect()
+		      Var filename As String = info.Lookup("filename", "")
+		      Var part As FolderItem = ModelsFolder().Child(filename + ".part")
+		      If part <> Nil And part.Exists Then part.Delete
+		    Next
+		  End If
+
+		  // A shasum verification (post-download, pre-install) may still be
+		  // running too — the file at this point is still named ".part". Swap
+		  // in a fresh dictionary before closing any Shell: Close triggers
+		  // Completed (possibly synchronously), and OnHashCompleted's own
+		  // Remove(sender) must land on the old, already-abandoned dictionary,
+		  // not the one this loop is still iterating.
+		  If mVerifying <> Nil Then
+		    Var pending As Dictionary = mVerifying
+		    mVerifying = New Dictionary
+		    For Each key As Variant In pending.Keys
+		      Var sh As Shell = Shell(key)
+		      Var info As Dictionary = Dictionary(pending.Value(sh))
+		      If sh.IsRunning Then sh.Close
+		      Var file As FolderItem = FolderItem(info.Lookup("file", Nil))
+		      If file <> Nil And file.Exists Then file.Delete
+		    Next
+		  End If
 		End Sub
 	#tag EndMethod
 
@@ -142,7 +211,7 @@ Protected Module ModelManager
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function CatalogEntry(id As String, name As String, description As String, ram As String, repo As String, filename As String, bytes As Int64, recommended As Boolean) As JSONItem
+		Private Function CatalogEntry(id As String, name As String, description As String, ram As String, repo As String, filename As String, bytes As Int64, recommended As Boolean, sha256 As String) As JSONItem
 		  Var entry As New JSONItem
 		  entry.Value("id") = id
 		  entry.Value("name") = name
@@ -152,6 +221,7 @@ Protected Module ModelManager
 		  entry.Value("filename") = filename
 		  entry.Value("bytes") = bytes
 		  entry.Value("recommended") = recommended
+		  entry.Value("sha256") = sha256
 		  Return entry
 		End Function
 	#tag EndMethod
@@ -164,12 +234,12 @@ Protected Module ModelManager
 		  // Coder 7B is the recommended default: in testing (July 2026) it was the
 		  // smallest model that reproduced doc syntax faithfully — the 4B models
 		  // recite syntax rules correctly but violate them in their own code.
-		  catalog.Add(CatalogEntry("qwen25-coder-7b-q6", "Qwen2.5 Coder 7B (Q6)", "Alibaba. Most accurate Xojo code answers, for 16 GB+ Macs.", "~9 GB", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "qwen2.5-coder-7b-instruct-q6_k.gguf", 6254198784, True))
-		  catalog.Add(CatalogEntry("qwen3-4b-q4", "Qwen3 4B Instruct (Q4)", "Alibaba. Fast and light, fits 8 GB Macs.", "~5 GB", "unsloth/Qwen3-4B-Instruct-2507-GGUF", "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497281120, False))
-		  catalog.Add(CatalogEntry("gemma3-4b-q4", "Gemma 3 4B (Q4)", "Google. Strong all-rounder, fits 8 GB Macs.", "~5 GB", "ggml-org/gemma-3-4b-it-GGUF", "gemma-3-4b-it-Q4_K_M.gguf", 2489757856, False))
-		  catalog.Add(CatalogEntry("phi4-mini-q4", "Phi-4 Mini 3.8B (Q4)", "Microsoft, MIT licence. Good reasoning, fits 8 GB Macs.", "~5 GB", "unsloth/Phi-4-mini-instruct-GGUF", "Phi-4-mini-instruct-Q4_K_M.gguf", 2491874272, False))
-		  catalog.Add(CatalogEntry("gpt-oss-20b", "GPT-OSS 20B (MXFP4)", "OpenAI. Strongest option, for 16 GB+ Macs.", "~16 GB", "ggml-org/gpt-oss-20b-GGUF", "gpt-oss-20b-mxfp4.gguf", 12109566560, False))
-		  catalog.Add(CatalogEntry("mistral-small-24b-q4", "Mistral Small 3.2 24B (Q4)", "Mistral (EU). Big and capable, for 24 GB+ Macs.", "~17 GB", "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF", "mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf", 14333915264, False))
+		  catalog.Add(CatalogEntry("qwen25-coder-7b-q6", "Qwen2.5 Coder 7B (Q6)", "Alibaba. Most accurate Xojo code answers, for 16 GB+ Macs.", "~9 GB", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "qwen2.5-coder-7b-instruct-q6_k.gguf", 6254198784, True, "46291ddea1bfb608fe63d9a1907eea6918bda87a7626593edc4bf97c5fd73f9d"))
+		  catalog.Add(CatalogEntry("qwen3-4b-q4", "Qwen3 4B Instruct (Q4)", "Alibaba. Fast and light, fits 8 GB Macs.", "~5 GB", "unsloth/Qwen3-4B-Instruct-2507-GGUF", "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497281120, False, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"))
+		  catalog.Add(CatalogEntry("gemma3-4b-q4", "Gemma 3 4B (Q4)", "Google. Strong all-rounder, fits 8 GB Macs.", "~5 GB", "ggml-org/gemma-3-4b-it-GGUF", "gemma-3-4b-it-Q4_K_M.gguf", 2489757856, False, "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863"))
+		  catalog.Add(CatalogEntry("phi4-mini-q4", "Phi-4 Mini 3.8B (Q4)", "Microsoft, MIT licence. Good reasoning, fits 8 GB Macs.", "~5 GB", "unsloth/Phi-4-mini-instruct-GGUF", "Phi-4-mini-instruct-Q4_K_M.gguf", 2491874272, False, "88c00229914083cd112853aab84ed51b87bdf6b9ce42f532d8c85c7c63b1730a"))
+		  catalog.Add(CatalogEntry("gpt-oss-20b", "GPT-OSS 20B (MXFP4)", "OpenAI. Strongest option, for 16 GB+ Macs.", "~16 GB", "ggml-org/gpt-oss-20b-GGUF", "gpt-oss-20b-mxfp4.gguf", 12109566560, False, "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901"))
+		  catalog.Add(CatalogEntry("mistral-small-24b-q4", "Mistral Small 3.2 24B (Q4)", "Mistral (EU). Big and capable, for 24 GB+ Macs.", "~17 GB", "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF", "mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf", 14333915264, False, "80f5bda68f156f12650ca03a0a2dbfae06a215ac41caa773b8631a479f82415e"))
 		  Return catalog.ToString
 		End Function
 	#tag EndMethod
@@ -181,8 +251,10 @@ Protected Module ModelManager
 		  Var repo As String = entry.Lookup("repo", "")
 		  Var filename As String = entry.Lookup("filename", "")
 		  Var bytes As Int64 = entry.Lookup("bytes", 0).Int64Value
+		  Var sha256 As String = entry.Lookup("sha256", "")
 
 		  If mDownloads = Nil Then mDownloads = New Dictionary
+		  If IsModelBusy(modelId) Then Return // already downloading or verifying
 		  Var url As String = kHFBase + "/" + repo + "/resolve/main/" + filename
 		  // Download directly to a .part file; OnFileReceived renames it
 		  Var dest As FolderItem = ModelsFolder().Child(filename + ".part")
@@ -196,6 +268,7 @@ Protected Module ModelManager
 		  info.Value("modelId") = modelId
 		  info.Value("filename") = filename
 		  info.Value("bytes") = bytes
+		  info.Value("sha256") = sha256
 		  info.Value("lastProgressTick") = System.Ticks
 		  mDownloads.Value(conn) = info
 
@@ -419,6 +492,7 @@ Protected Module ModelManager
 		  Var modelId As String = info.Lookup("modelId", "")
 		  Var filename As String = info.Lookup("filename", "")
 		  Var expectedBytes As Int64 = info.Lookup("bytes", 0).Int64Value
+		  Var expectedSHA As String = info.Lookup("sha256", "").StringValue.Lowercase
 
 		  If httpStatus <> 200 Then
 		    If file <> Nil And file.Exists Then file.Delete
@@ -434,6 +508,82 @@ Protected Module ModelManager
 		    Return
 		  End If
 
+		  If expectedSHA = "" Then
+		    // No pinned hash for this entry — install as before.
+		    InstallVerifiedFile(modelId, filename, file)
+		    Return
+		  End If
+
+		  VerifyThenInstall(modelId, filename, file, expectedSHA)
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub VerifyThenInstall(modelId As String, filename As String, file As FolderItem, expectedSHA As String)
+		  // GGUF files run up to ~17 GB — too large to hash via Xojo's
+		  // Crypto.SHA2_256 (whole-file-in-one-MemoryBlock). Shell out to the
+		  // OS shasum binary instead, same pattern as launching llama-server:
+		  // an external process, watched asynchronously, never blocking the
+		  // UI thread while it streams the file.
+		  Var sh As New Shell
+		  sh.ExecuteMode = Shell.ExecuteModes.Asynchronous
+		  AddHandler sh.Completed, AddressOf OnHashCompleted
+
+		  Var info As New Dictionary
+		  info.Value("modelId") = modelId
+		  info.Value("filename") = filename
+		  info.Value("file") = file
+		  info.Value("expectedSHA") = expectedSHA
+		  If mVerifying = Nil Then mVerifying = New Dictionary
+		  mVerifying.Value(sh) = info
+
+		  App.AppendDebugLog("ModelManager: verifying SHA-256 of " + filename + EndOfLine)
+		  sh.Execute("/usr/bin/shasum", "-a 256 " + EscapeShellArg(file.NativePath))
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function EscapeShellArg(s As String) As String
+		  Return "'" + s.ReplaceAll("'", "'\''") + "'"
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnHashCompleted(sender As Shell)
+		  If mVerifying = Nil Or Not mVerifying.HasKey(sender) Then Return
+		  Var info As Dictionary = Dictionary(mVerifying.Value(sender))
+		  mVerifying.Remove(sender)
+
+		  Var modelId As String = info.Lookup("modelId", "")
+		  Var filename As String = info.Lookup("filename", "")
+		  Var file As FolderItem = FolderItem(info.Lookup("file", Nil))
+		  Var expectedSHA As String = info.Lookup("expectedSHA", "")
+
+		  // shasum prints "<64 hex chars>  <path>" on success.
+		  Var output As String = sender.Result.Trim
+		  Var actualSHA As String = ""
+		  If output.Length >= 64 Then actualSHA = output.Left(64).Lowercase
+
+		  If sender.ExitCode <> 0 Or actualSHA.Length <> 64 Then
+		    App.AppendDebugLog("ModelManager: shasum failed for " + filename + " (exit " + sender.ExitCode.ToString + "): " + output.Left(200) + EndOfLine)
+		    If file <> Nil And file.Exists Then file.Delete
+		    SendToJS("receiveDownloadDone(" + JSEscape(modelId) + ",false,""could not verify download integrity"");")
+		    Return
+		  End If
+
+		  If actualSHA <> expectedSHA Then
+		    App.AppendDebugLog("ModelManager: SHA-256 mismatch for " + filename + " — expected " + expectedSHA + ", got " + actualSHA + EndOfLine)
+		    If file <> Nil And file.Exists Then file.Delete
+		    SendToJS("receiveDownloadDone(" + JSEscape(modelId) + ",false,""downloaded file failed integrity check — please retry"");")
+		    Return
+		  End If
+
+		  InstallVerifiedFile(modelId, filename, file)
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub InstallVerifiedFile(modelId As String, filename As String, file As FolderItem)
 		  // Rename .part -> final filename, via backup so a failed move never
 		  // leaves an already-installed model deleted or half-replaced.
 		  Var final As FolderItem = ModelsFolder().Child(filename)
@@ -461,12 +611,12 @@ Protected Module ModelManager
 		    If modelId = "embedding" Then StartEmbedServer
 
 		  Catch e As RuntimeException
-		    App.AppendDebugLog("ModelManager.OnFileReceived: move exception: " + e.Message + EndOfLine)
+		    App.AppendDebugLog("ModelManager.InstallVerifiedFile: move exception: " + e.Message + EndOfLine)
 		    If Not final.Exists And backup.Exists Then
 		      Try
 		        backup.MoveFileTo(final)
 		      Catch e2 As RuntimeException
-		        App.AppendDebugLog("ModelManager.OnFileReceived: restore failed, previous model at " + backup.NativePath + EndOfLine)
+		        App.AppendDebugLog("ModelManager.InstallVerifiedFile: restore failed, previous model at " + backup.NativePath + EndOfLine)
 		      End Try
 		    End If
 		    SendToJS("receiveDownloadDone(" + JSEscape(modelId) + ",false," + JSEscape(e.Message) + ");")
@@ -1132,6 +1282,10 @@ Protected Module ModelManager
 
 	#tag Property, Flags = &h21
 		Private mDownloads As Dictionary
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mVerifying As Dictionary
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
