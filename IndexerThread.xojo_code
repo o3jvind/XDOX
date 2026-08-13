@@ -22,14 +22,23 @@ Inherits Thread
 		EmbedOnly As Boolean
 	#tag EndProperty
 
+	#tag Property, Flags = &h21
+		Private mTransactionOpen As Boolean
+	#tag EndProperty
+
 	#tag Event
 		Sub Run()
+		  // Own connection to the same file. WAL lets this writer run alongside
+		  // the main thread's readers without the two interleaving transactions
+		  // on one shared handle (which would throw "transaction within a
+		  // transaction" / leave writes in the wrong transaction). Declared
+		  // outside the Try so the Catch below can roll back and close it —
+		  // Xojo has no Finally, so this is the only place cleanup can happen
+		  // for an exception raised mid-transaction.
+		  Var db As SQLiteDatabase
+		  mTransactionOpen = False
 		  Try
-		    // Own connection to the same file. WAL lets this writer run alongside
-		    // the main thread's readers without the two interleaving transactions
-		    // on one shared handle (which would throw "transaction within a
-		    // transaction" / leave writes in the wrong transaction).
-		    Var db As SQLiteDatabase = DBHelper.OpenConnection
+		    db = DBHelper.OpenConnection
 		    If db = Nil Then
 		      AddUserInterfaceUpdate(New Pair("type", "error"), New Pair("msg", "Database not available"))
 		      Return
@@ -64,17 +73,21 @@ Inherits Thread
 		    Var chunks() As DocChunk = splitter.SplitIfNeeded(rawChunks)
 		    Var total As Integer = chunks.Count
 		    If total = 0 Then
+		      db.Close
 		      AddUserInterfaceUpdate(New Pair("type", "error"), New Pair("msg", "No chunks produced from documentation file."))
 		      Return
 		    End If
 
 		    // Non-destructive per-version reindex: wipe only this version (and the
 		    // version-independent map chunks, which are reinserted below) — other
-		    // indexed versions survive.
-		    DBHelper.ClearChunksForVersion(version, db)
-
+		    // indexed versions survive. Deletion happens inside the same
+		    // transaction as the inserts/links below, so a failure partway
+		    // through rolls back to the previous, still-working index instead
+		    // of leaving the version wiped with nothing usable in its place.
 		    Var ids() As Integer
 		    db.BeginTransaction
+		    mTransactionOpen = True
+		    DBHelper.ClearChunksForVersion(version, db)
 		    For ci As Integer = 0 To total - 1
 		      Var chunk As DocChunk = chunks(ci)
 		      chunk.ChunkIndex = ci
@@ -90,11 +103,9 @@ Inherits Thread
 		        AddUserInterfaceUpdate(New Pair("type", "progress"), New Pair("done", done), New Pair("total", total))
 		      End If
 		    Next
-		    db.CommitTransaction
 
 		    AddUserInterfaceUpdate(New Pair("type", "progress"), New Pair("done", total), New Pair("total", total))
 
-		    db.BeginTransaction
 		    Var linkTotal As Integer = ids.Count
 		    For li As Integer = 0 To linkTotal - 1
 		      Var prevId As Integer = -1
@@ -104,6 +115,7 @@ Inherits Thread
 		      DBHelper.LinkChunks(ids(li), prevId, nextId, db)
 		    Next
 		    db.CommitTransaction
+		    mTransactionOpen = False
 
 		    // docs_version metadata now tracks the most-recently-indexed version
 		    // (kept for backward-compat / staleness messaging). active_docs_version
@@ -144,6 +156,16 @@ Inherits Thread
 		    AddUserInterfaceUpdate(New Pair("type", "complete"), New Pair("isReindex", IsReindex))
 		  Catch e As RuntimeException
 		    App.AppendDebugLog("IndexerThread: " + e.Message + EndOfLine)
+		    If db <> Nil Then
+		      If mTransactionOpen Then
+		        Try
+		          db.RollbackTransaction
+		        Catch e2 As DatabaseException
+		        End Try
+		        mTransactionOpen = False
+		      End If
+		      db.Close
+		    End If
 		    AddUserInterfaceUpdate(New Pair("type", "error"), New Pair("msg", e.Message))
 		  End Try
 		End Sub
@@ -206,6 +228,7 @@ Inherits Thread
 		        Exit
 		      End If
 		      db.BeginTransaction
+		      mTransactionOpen = True
 		      For k As Integer = 0 To ids.LastIndex
 		        Var single As MemoryBlock = Embedder.FetchEmbedding(texts(k), 30)
 		        If single <> Nil Then
@@ -216,12 +239,14 @@ Inherits Thread
 		        End If
 		      Next
 		      db.CommitTransaction
+		      mTransactionOpen = False
 		      done = done + ids.Count
 		      Continue
 		    End If
 		    consecutiveFailures = 0
 
 		    db.BeginTransaction
+		    mTransactionOpen = True
 		    For k As Integer = 0 To ids.LastIndex
 		      If k <= embs.LastIndex And embs(k) <> Nil Then
 		        DBHelper.StoreChunkEmbedding(ids(k), embs(k), db)
@@ -231,6 +256,7 @@ Inherits Thread
 		      End If
 		    Next
 		    db.CommitTransaction
+		    mTransactionOpen = False
 
 		    done = done + ids.Count
 		    If done Mod 200 < ids.Count Then
