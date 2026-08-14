@@ -70,8 +70,10 @@ Protected Module Retrieval
 		  Var results() As RetrievalResult
 
 		  // Cosine over every embedded chunk for the active version plus the
-		  // version-independent chunks (docs_version=''). Filtering here also shrinks
-		  // the in-memory cosine scan. Keep this WHERE in sync with XMCP SemanticSearch.
+		  // version-independent chunks (docs_version='') and MBS docset chunks
+		  // (docs_version=kMBSDocsVersion, always included regardless of active
+		  // Xojo version). Filtering here also shrinks the in-memory cosine scan.
+		  // Keep this WHERE in sync with XMCP SemanticSearch.
 		  Var chunkIDs() As Integer
 		  Var titles() As String
 		  Var texts() As String
@@ -82,7 +84,7 @@ Protected Module Retrieval
 		  Var cosScores() As Double
 
 		  Try
-		    Var rs As RowSet = db.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ? OR c.docs_version = ''", activeVersion)
+		    Var rs As RowSet = db.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ? OR c.docs_version = '' OR c.docs_version = ?", activeVersion, DBHelper.kMBSDocsVersion)
 		    While Not rs.AfterLastRow
 		      Var embBlob As MemoryBlock = rs.Column("embedding").BlobValue
 		      If embBlob <> Nil And embBlob.Size > 0 Then
@@ -128,10 +130,24 @@ Protected Module Retrieval
 		    End Try
 		  End If
 
-		  // Combined: 70% vector + 30% FTS.
+		  // Combined: 70% vector + 30% FTS, plus a flat boost when the query
+		  // names this chunk's class exactly. Cosine similarity alone can't
+		  // reliably separate "DesktopWKWebViewControlMBS" from
+		  // "DesktopWebView2ControlMBS" — both score ~0.75 against a query
+		  // naming the former, close enough for the wrong class to edge into
+		  // the top few results. An explicit substring match on the query
+		  // asking about a specific named class is a much stronger signal than
+		  // embedding proximity can give here, so it overrides a close cosine
+		  // race rather than just nudging it. Keep in sync with XMCP SemanticSearch.
+		  Var queryLower As String = query.Lowercase
 		  Var combined() As Double
 		  For i As Integer = 0 To cosScores.LastIndex
-		    combined.Add(cosScores(i) * 0.7 + ftsScores(i) * 0.3)
+		    Var score As Double = cosScores(i) * 0.7 + ftsScores(i) * 0.3
+		    Var className As String = ExtractClassName(titles(i))
+		    If className <> "" And queryLower.IndexOf(className.Lowercase) >= 0 Then
+		      score = score + kClassNameBoost
+		    End If
+		    combined.Add(score)
 		  Next
 
 		  // Partial selection sort for the top maxResults*2 candidates.
@@ -251,7 +267,8 @@ Protected Module Retrieval
 	#tag Method, Flags = &h21
 		Private Function KeywordSearchChunks(query As String, limit As Integer, db As SQLiteDatabase, activeVersion As String) As RetrievalResult()
 		  // BM25-only fallback — always works, no servers needed. Scoped to the
-		  // active version plus version-independent chunks (docs_version='').
+		  // active version plus version-independent chunks (docs_version='') and
+		  // MBS docset chunks (docs_version=kMBSDocsVersion).
 		  Var results() As RetrievalResult
 		  If db = Nil Then Return results
 
@@ -263,9 +280,9 @@ Protected Module Retrieval
 		      + "FROM chunks_fts " _
 		      + "JOIN chunks c ON c.id = chunks_fts.rowid " _
 		      + "WHERE chunks_fts MATCH ? " _
-		      + "AND (c.docs_version = ? OR c.docs_version = '') " _
+		      + "AND (c.docs_version = ? OR c.docs_version = '' OR c.docs_version = ?) " _
 		      + "ORDER BY rank LIMIT ?"
-		    Var rs As RowSet = db.SelectSQL(sql, safe, activeVersion, limit)
+		    Var rs As RowSet = db.SelectSQL(sql, safe, activeVersion, DBHelper.kMBSDocsVersion, limit)
 
 		    Var seenIds() As Integer
 		    While Not rs.AfterLastRow
@@ -722,6 +739,27 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
+		Private Function ExtractClassName(title As String) As String
+		  // Chunk titles are near-universally "ClassName.member..." (both the
+		  // RST-derived Xojo-doc titles and the MBS docset's ItemTitle text
+		  // follow this shape). Whole-page or FAQ-style titles with no "." are
+		  // left as "" — nothing meaningful to boost against there. Only
+		  // class-name-shaped prefixes are used (letters/digits, at least 4
+		  // chars) so a title like "How to....Question?" doesn't turn "How"
+		  // into a bogus boost target.
+		  Var dotPos As Integer = title.IndexOf(".")
+		  If dotPos < 4 Then Return ""
+		  Var candidate As String = title.Left(dotPos)
+		  For i As Integer = 0 To candidate.Length - 1
+		    Var ch As String = candidate.Middle(i, 1)
+		    Var isAlnum As Boolean = (ch >= "a" And ch <= "z") Or (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9")
+		    If Not isAlnum Then Return ""
+		  Next
+		  Return candidate
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
 		Private Function AlreadySeen(ids() As Integer, id As Integer) As Boolean
 		  For Each existing As Integer In ids
 		    If existing = id Then Return True
@@ -789,6 +827,9 @@ Protected Module Retrieval
 	#tag EndConstant
 
 	#tag Constant, Name = kNoteRelevanceFloor, Type = Double, Dynamic = False, Default = \"0.45", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kClassNameBoost, Type = Double, Dynamic = False, Default = \"0.15", Scope = Private
 	#tag EndConstant
 
 

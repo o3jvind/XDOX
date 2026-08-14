@@ -53,12 +53,18 @@ Public Module DBHelper
 		    Return
 		  End If
 
-		  // Pre-1.0 schema policy: no migrations. An outdated DB is deleted and
-		  // recreated from the template; the empty chunks table triggers a full
-		  // reindex (~5 min) on this launch. Notes are discarded — accepted.
-		  If f.Exists And SchemaVersionOf(f) < kSchemaVersion Then
-		    App.AppendDebugLog("DBHelper.InitDB: schema outdated — recreating DB from template (full reindex will follow)" + EndOfLine)
-		    DeleteDatabaseFiles(f)
+		  // Schema 4 is the last version under the old "delete and recreate"
+		  // pre-1.0 policy — a release exists with real user notes/chunks now, so
+		  // wiping the DB on every future schema bump is no longer acceptable.
+		  // A DB at schema <= 3 predates real migrations and still gets the old
+		  // recreate-from-template treatment (one last time); schema 4 and up
+		  // migrate in place via MigrateSchema below.
+		  If f.Exists Then
+		    Var v As Integer = SchemaVersionOf(f)
+		    If v > 0 And v <= 3 Then
+		      App.AppendDebugLog("DBHelper.InitDB: schema " + v.ToString + " predates migrations — recreating DB from template (full reindex will follow)" + EndOfLine)
+		      DeleteDatabaseFiles(f)
+		    End If
 		  End If
 
 		  If Not f.Exists Then
@@ -77,10 +83,37 @@ Public Module DBHelper
 		    // WAL so external readers (XMCP) can query while XDOX writes.
 		    db.ExecuteSQL("PRAGMA journal_mode=WAL")
 		    App.SetDB(db)
+		    MigrateSchema(db)
 		  Catch e As IOException
 		    App.AppendDebugLog("DBHelper.InitDB: IOException " + e.Message + EndOfLine)
 		  Catch e As RuntimeException
 		    App.AppendDebugLog("DBHelper.InitDB: RuntimeException " + e.Message + EndOfLine)
+		  End Try
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub MigrateSchema(db As SQLiteDatabase)
+		  // In-place migrations for DBs at schema >= 4 (a fresh template copy is
+		  // already at kSchemaVersion and every step below no-ops on it). Each
+		  // step is guarded by the version it introduces, so upgrading across
+		  // several versions at once just runs each step in order.
+		  Try
+		    Var v As Integer = SchemaVersionOf(db.DatabaseFile)
+		    If v = 0 Then v = kSchemaVersion // fresh template copy — already current
+
+		    If v < 5 Then
+		      // content_hash backs MBS-docset incremental reindexing: unchanged
+		      // chunks (matching hash) skip re-embedding on the next import.
+		      // Existing chunks get NULL — harmless, since only the MBS importer
+		      // ever reads this column.
+		      db.ExecuteSQL("ALTER TABLE chunks ADD COLUMN content_hash TEXT")
+		      db.ExecuteSQL("CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(source, content_hash)")
+		    End If
+
+		    SetMetadata("schema_version", kSchemaVersion.ToString, db)
+		  Catch e As DatabaseException
+		    App.AppendDebugLog("DBHelper.MigrateSchema: " + e.Message + EndOfLine)
 		  End Try
 		End Sub
 	#tag EndMethod
@@ -225,7 +258,9 @@ Public Module DBHelper
 		  // indexed versions survive. The chunks_ad trigger cascades to embeddings
 		  // and chunks_fts. Version-independent map chunks (docs_version='') are
 		  // reinserted on every reindex, so clear them here too rather than leave
-		  // duplicates accumulating.
+		  // duplicates accumulating. MBS chunks use docs_version=kMBSDocsVersion
+		  // ("mbs"), never '', specifically so this exact-match delete can never
+		  // catch them — a Xojo-docs reindex must never touch MBS content.
 		  Var d As SQLiteDatabase = Resolve(conn)
 		  If d = Nil Then Return
 		  Try
@@ -254,11 +289,15 @@ Public Module DBHelper
 	#tag Method, Flags = &h0
 		Function IndexedVersions() As String()
 		  // Distinct non-empty docs_version values present in chunks, newest first.
-		  // '' (version-independent map chunks) is excluded — it is not a version.
+		  // '' (version-independent map chunks) and kMBSDocsVersion ("mbs", the
+		  // MBS docset's sentinel) are excluded — neither is a Xojo version, and
+		  // "mbs" DESC-sorts ahead of every real "Xojo <version>" string, which
+		  // would otherwise make it look like the newest/active version to any
+		  // caller that falls back to IndexedVersions(0).
 		  Var result() As String
 		  If DB = Nil Then Return result
 		  Try
-		    Var rs As RowSet = DB.SelectSQL("SELECT DISTINCT docs_version FROM chunks WHERE docs_version <> '' ORDER BY docs_version DESC")
+		    Var rs As RowSet = DB.SelectSQL("SELECT DISTINCT docs_version FROM chunks WHERE docs_version <> '' AND docs_version <> ? ORDER BY docs_version DESC", kMBSDocsVersion)
 		    While Not rs.AfterLastRow
 		      result.Add(rs.Column("docs_version").StringValue)
 		      rs.MoveToNextRow
@@ -324,6 +363,86 @@ Public Module DBHelper
 		    Return -1
 		  End Try
 		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function MBSChunkHashes(conn As SQLiteDatabase = Nil) As Dictionary
+		  // source -> content_hash for every currently-indexed MBS docset chunk.
+		  // MBSDocsetImporter diffs a freshly-parsed docset against this map so an
+		  // unchanged entry (same hash) skips re-embedding entirely.
+		  Var d As SQLiteDatabase = Resolve(conn)
+		  Var result As New Dictionary
+		  If d = Nil Then Return result
+		  Try
+		    Var rs As RowSet = d.SelectSQL("SELECT source, content_hash FROM chunks WHERE source LIKE ?", kMBSSourcePrefix + "%")
+		    While Not rs.AfterLastRow
+		      result.Value(rs.Column("source").StringValue) = rs.Column("content_hash").StringValue
+		      rs.MoveToNextRow
+		    Wend
+		    rs.Close
+		  Catch e As DatabaseException
+		    App.AppendDebugLog("DBHelper.MBSChunkHashes: " + e.Message + EndOfLine)
+		  End Try
+		  Return result
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub UpsertMBSChunk(source As String, title As String, chunkText As String, contentHash As String, conn As SQLiteDatabase = Nil)
+		  // Insert a new MBS chunk, or overwrite an existing one's text/hash and
+		  // reset it for re-embedding. Caller (MBSDocsetImporter) is expected to
+		  // have already checked MBSChunkHashes and skipped this call entirely
+		  // when the hash is unchanged, so every call here does real work.
+		  //
+		  // docs_version is kMBSDocsVersion ("mbs"), NOT '' — a Xojo-docs reindex
+		  // wipes every chunk with docs_version='' (ClearChunksForVersion, so the
+		  // version-independent APIMigrationMap chunks it reinserts don't pile up
+		  // as duplicates). MBS content has nothing to do with Xojo versions and
+		  // must survive that wipe untouched, hence its own sentinel value.
+		  Var d As SQLiteDatabase = Resolve(conn)
+		  If d = Nil Then Return
+		  Try
+		    Var rs As RowSet = d.SelectSQL("SELECT id FROM chunks WHERE source=?", source)
+		    If rs.AfterLastRow Then
+		      rs.Close
+		      d.ExecuteSQL("INSERT INTO chunks (source, title, chunk_text, chunk_index, docs_version, content_hash, embedded) " _
+		        + "VALUES (?, ?, ?, 0, ?, ?, 0)", source, title, chunkText, kMBSDocsVersion, contentHash)
+		    Else
+		      Var id As Integer = rs.Column("id").IntegerValue
+		      rs.Close
+		      d.ExecuteSQL("UPDATE chunks SET title=?, chunk_text=?, content_hash=?, embedded=0 WHERE id=?", _
+		        title, chunkText, contentHash, id)
+		    End If
+		  Catch e As DatabaseException
+		    App.AppendDebugLog("DBHelper.UpsertMBSChunk: " + e.Message + EndOfLine)
+		  End Try
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub DeleteMBSChunksExcept(keepSources As Dictionary, conn As SQLiteDatabase = Nil)
+		  // Removes MBS chunks whose source is no longer produced by the current
+		  // docset scan (entry renamed or removed upstream). Deleting by id in
+		  // batches avoids building one giant NOT IN (...) clause for ~50k rows.
+		  Var d As SQLiteDatabase = Resolve(conn)
+		  If d = Nil Then Return
+		  Try
+		    Var toDelete() As Integer
+		    Var rs As RowSet = d.SelectSQL("SELECT id, source FROM chunks WHERE source LIKE ?", kMBSSourcePrefix + "%")
+		    While Not rs.AfterLastRow
+		      If Not keepSources.HasKey(rs.Column("source").StringValue) Then
+		        toDelete.Add(rs.Column("id").IntegerValue)
+		      End If
+		      rs.MoveToNextRow
+		    Wend
+		    rs.Close
+		    For Each id As Integer In toDelete
+		      d.ExecuteSQL("DELETE FROM chunks WHERE id=?", id) // chunks_ad trigger cascades
+		    Next
+		  Catch e As DatabaseException
+		    App.AppendDebugLog("DBHelper.DeleteMBSChunksExcept: " + e.Message + EndOfLine)
+		  End Try
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -675,7 +794,13 @@ Public Module DBHelper
 		End Function
 	#tag EndMethod
 
-	#tag Constant, Name = kSchemaVersion, Type = Double, Dynamic = False, Default = \"3", Scope = Public
+	#tag Constant, Name = kSchemaVersion, Type = Double, Dynamic = False, Default = \"5", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kMBSSourcePrefix, Type = String, Dynamic = False, Default = \"MBS Docset > ", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kMBSDocsVersion, Type = String, Dynamic = False, Default = \"mbs", Scope = Public
 	#tag EndConstant
 
 	#tag Method, Flags = &h0

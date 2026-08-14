@@ -3,7 +3,58 @@
 All notable changes to XDOX are documented here. Versions follow
 `MAJOR.MINOR.PATCH`; see `RELEASING.md` for the tagging convention.
 
-## [0.1.1] — Unreleased
+## [0.2.0] — Unreleased
+
+MBS Xojo Plugins documentation is now indexed and searchable alongside the
+built-in Xojo docs, plus retrieval-quality fixes surfaced while building it.
+
+### Added
+
+- **MBS docset ingestion** (`MBSDocsetParser`, `MBSIndexerThread`,
+  `MBSIndexer`): **Tools → Index MBS Docs…** lets you point at a downloaded
+  MBS Xojo Plugins Dash docset (`MBS.docset`) and index it into the same
+  chunk/embedding pipeline as the Xojo docs. The whole `Documents/` folder is
+  scanned directly via `FileListMBS` rather than trusting the docset's own
+  `docSet.dsidx` index — about a third of the docset's HTML files (including
+  `DesktopWKWebViewControlMBS`'s own method pages) are never referenced by
+  the index despite holding real content, so an dsidx-only scan silently
+  missed them. A `.docset` bundle is picked via an `OpenFileDialog` filtered
+  to the extension, not a folder picker — macOS folder pickers can't select
+  or navigate into bundles.
+  - **Incremental re-indexing**: a new `content_hash` column
+    (`chunks.content_hash`) lets a later MBS docset update skip re-embedding
+    every chunk whose text hasn't changed — only new/edited entries hit the
+    embedding server. On the second full run this session, 8,802 of 60,435
+    chunks were skipped as unchanged.
+  - MBS chunks carry their own `docs_version` sentinel (`"mbs"`) instead of
+    the version-independent `''` used by curated migration chunks — sharing
+    `''` meant a routine Xojo-docs reindex (`ClearChunksForVersion`) silently
+    deleted all indexed MBS content, and `"mbs"` briefly surfaced as a fake
+    "orphaned Xojo version" in the housekeeping dialog since it sorted ahead
+    of real version strings. Both are fixed; `DBHelper.IndexedVersions()` now
+    explicitly excludes it.
+  - The HTML `<table class=FunctionHeaderTable>` (Type/Topic/Plugin/Version/
+    platform columns) that accompanies every documented member is rewritten
+    into `Key: Value` lines before general tag-stripping runs, instead of
+    linearizing into two disconnected columns of words with no header-to-
+    value pairing — without this, nothing in the indexed text said whether a
+    given member was a method, property, or event.
+  - Retrieval now applies a flat score boost when a question names a chunk's
+    class exactly (`Retrieval.ExtractClassName` + `kClassNameBoost`): cosine
+    similarity alone couldn't reliably separate similarly-named MBS classes
+    (e.g. `DesktopWKWebViewControlMBS` vs `DesktopWebView2ControlMBS`, ~0.75
+    vs ~0.77) within the top few retrieved chunks. Ported to XMCP's
+    `SemanticSearch` to keep both sides of the scoring recipe in sync.
+
+### Changed
+
+- **Schema migrations**: `DBHelper.InitDB` no longer wipes the whole database
+  on every `kSchemaVersion` bump. A release with real users now exists, so
+  from schema 4 onward, changes migrate in place (see `MigrateSchema`)
+  instead of deleting notes and all indexed chunks. Only a DB below schema 4
+  still gets the old recreate-from-template treatment, once.
+
+## [0.1.1] — 2026-08-13
 
 Security and robustness fixes from an external code review, verified
 against the code and, where practical, against a running debug build

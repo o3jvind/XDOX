@@ -88,6 +88,9 @@ notes → **Publish**.
 
 ## Versioning convention
 
-Use `vMAJOR.MINOR.PATCH` tags (`v0.1.0`, `v0.2.0`, …). Pre-1.0 the schema has no
-migrations, so a release that bumps `DBHelper.kSchemaVersion` wipes the user's
-local database and notes on first launch — call that out in the release notes.
+Use `vMAJOR.MINOR.PATCH` tags (`v0.1.0`, `v0.2.0`, …). As of schema 4, a
+`DBHelper.kSchemaVersion` bump migrates the existing database in place
+(`DBHelper.MigrateSchema`) rather than wiping it — notes and indexed chunks
+survive an upgrade. Only a database still below schema 4 gets the old
+recreate-from-template treatment (a real release now has users, so that
+destructive path is a one-time fallback, not the standing policy).

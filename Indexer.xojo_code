@@ -11,7 +11,9 @@ Protected Module Indexer
 
 	#tag Method, Flags = &h0
 		Sub StartIndex(docsFile As FolderItem, progressDelegate As IndexerDelegate, isReindex As Boolean, targetVersion As String = "")
-		  If IsRunning Then Return
+		  // See MBSIndexer.StartIndex for why the two indexers refuse to run
+		  // concurrently.
+		  If IsRunning Or MBSIndexer.MBSIsRunning Then Return
 		  IsRunning = True
 
 		  Var t As New IndexerThread

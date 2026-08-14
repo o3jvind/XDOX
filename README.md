@@ -9,6 +9,7 @@ XDOX is also the knowledge-base engine for the wider ecosystem: it indexes the d
 ## Features
 
 - **Chat with the Xojo docs** — streaming answers from a local LLM, grounded in hybrid retrieval (semantic embeddings + BM25 full-text) over the official documentation installed with the Xojo IDE.
+- **MBS Xojo Plugins docs** — index a downloaded [MBS](https://www.monkeybreadsoftware.net/) Dash docset (Tools → Index MBS Docs…) so plugin classes, methods, and FAQs are searchable alongside the built-in docs. Re-indexing after an MBS update only re-embeds changed entries.
 - **Personal notes** — write notes in Markdown (edit/preview), with auto-tag suggestions and semantic search. Notes are retrieved alongside the docs and take precedence where they disagree, so your own conventions and fixes inform the answer. The same notes are available to coding agents through XMCP.
 - **Multiple Xojo versions** — index several installed Xojo versions side by side and switch which one chat/retrieval uses; old versions can be cleaned up when uninstalled.
 - **Staleness tracking** — notes can be marked *global* (version-independent) or tied to a specific Xojo version; only version-specific notes are flagged ⚠️ for review when a newer version is indexed, and the model is told to caveat them.

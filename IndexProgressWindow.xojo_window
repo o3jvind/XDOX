@@ -11,14 +11,14 @@ Begin DesktopWindow IndexProgressWindow
    HasMaximizeButton=   False
    HasMinimizeButton=   False
    HasTitleBar     =   True
-   Height          =   180
+   Height          =   196
    ImplicitInstance=   False
    MacProcID       =   0
-   MaximumHeight   =   180
+   MaximumHeight   =   196
    MaximumWidth    =   440
    MenuBar         =   1984348159
    MenuBarVisible  =   False
-   MinimumHeight   =   180
+   MinimumHeight   =   196
    MinimumWidth    =   440
    Resizeable      =   False
    Title           =   "Indexing Xojo Documentation"
@@ -111,7 +111,7 @@ Begin DesktopWindow IndexProgressWindow
       Enabled         =   True
       FontSize        =   12.0
       FontUnit        =   0
-      Height          =   20
+      Height          =   36
       Index           =   -2147483648
       InitialParent   =   ""
       Italic          =   False
@@ -121,7 +121,7 @@ Begin DesktopWindow IndexProgressWindow
       LockLeft        =   True
       LockRight       =   True
       LockTop         =   True
-      Multiline       =   False
+      Multiline       =   True
       Scope           =   0
       TabIndex        =   3
       TabPanelIndex   =   0
@@ -141,7 +141,19 @@ End
 		Sub IndexerParsing()
 		  ProgressBar.Indeterminate = True
 		  ChunkLabel.Text = "Parsing documentation…"
-		  HintLabel.Text = "Building the keyword index — takes a minute or two."
+		  HintLabel.Text = "Building the keyword index."
+		End Sub
+
+		Sub IndexerFileScanProgress(filesScanned As Integer, totalFiles As Integer)
+		  ProgressBar.Indeterminate = False
+		  Var pct As Integer = If(totalFiles > 0, (filesScanned * 100) \ totalFiles, 0)
+		  ProgressBar.Value = pct
+		  ChunkLabel.Text = "Scanning file " + Format(filesScanned, "###,###") _
+		    + " of " + Format(totalFiles, "###,###")
+		  // File sizes vary a lot (some example pages run past 1 MB) — the
+		  // percentage can sit still for a while on those without anything
+		  // actually being stuck, so say so rather than let it look hung.
+		  HintLabel.Text = "Reading documentation files — some are much larger than others, so progress may pause briefly."
 		End Sub
 
 		Sub IndexerProgress(chunksProcessed As Integer, totalChunks As Integer)
@@ -150,7 +162,7 @@ End
 		  ProgressBar.Value = pct
 		  ChunkLabel.Text = "Processing chunk " + Format(chunksProcessed, "###,###") _
 		    + " of " + Format(totalChunks, "###,###")
-		  HintLabel.Text = "Building the keyword index — takes a minute or two."
+		  HintLabel.Text = "Building the keyword index."
 		End Sub
 	#tag EndMethod
 
@@ -161,7 +173,11 @@ End
 		  ProgressBar.Value = pct
 		  ChunkLabel.Text = "Embedding chunk " + Format(chunksEmbedded, "###,###") _
 		    + " of " + Format(totalChunks, "###,###")
-		  HintLabel.Text = "Embedding for semantic search — about 5 minutes."
+		  // No fixed time estimate here — actual duration depends on how many
+		  // chunks are new/changed (content-hash caching skips the rest) and on
+		  // machine/model speed, so a fixed guess would just be wrong most of
+		  // the time. The percentage above is the honest signal.
+		  HintLabel.Text = "Embedding for semantic search."
 		End Sub
 	#tag EndMethod
 

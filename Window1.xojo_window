@@ -206,6 +206,13 @@ End
 		End Function
 	#tag EndMenuHandler
 
+	#tag MenuHandler
+		Function ToolsIndexMBSDocs() As Boolean Handles ToolsIndexMBSDocs.Action
+		  App.StartMBSIndexing
+		  Return True
+		End Function
+	#tag EndMenuHandler
+
 	#tag Method, Flags = &h0
 		Sub HideBanner()
 		  BannerBackground.Visible = False

@@ -105,6 +105,22 @@ Begin Menu MainMenuBar
          Visible = True
       End
    End
+   Begin DesktopMenuItem ToolsMenu
+      SpecialMenu = 0
+      Index = -2147483648
+      Text = "&Tools"
+      AutoEnabled = True
+      AutoEnable = True
+      Visible = True
+      Begin DesktopMenuItem ToolsIndexMBSDocs
+         SpecialMenu = 0
+         Index = -2147483648
+         Text = "Index MBS Docs…"
+         AutoEnabled = True
+         AutoEnable = True
+         Visible = True
+      End
+   End
    Begin DesktopMenuItem WindowMenu
       SpecialMenu = 0
       Index = -2147483648

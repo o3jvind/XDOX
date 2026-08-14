@@ -13,6 +13,12 @@ Implements IndexerDelegate
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Sub IndexerFileScanProgress(filesScanned As Integer, totalFiles As Integer)
+		  If Win <> Nil Then Win.IndexerFileScanProgress(filesScanned, totalFiles)
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Sub IndexerProgress(chunksProcessed As Integer, totalChunks As Integer)
 		  If Win <> Nil Then Win.IndexerProgress(chunksProcessed, totalChunks)
 		End Sub

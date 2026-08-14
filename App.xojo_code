@@ -192,6 +192,67 @@ Inherits DesktopApplication
 		End Sub
 	#tag EndMethod
 
+	#tag Method, Flags = &h0
+		Sub StartMBSIndexing()
+		  // User-driven, unlike Xojo-docs indexing: there's no fixed install
+		  // location for a Dash docset, so the user points at the ".docset"
+		  // bundle they downloaded (e.g. MBS Xojo Plugins from Dash/generator).
+		  //
+		  // A .docset is a real macOS bundle (has an Info.plist with a
+		  // CFBundleIdentifier), so ShowSelectFolderDialog can't be used to pick
+		  // it — macOS folder pickers treat bundles as opaque, unselectable
+		  // packages you can't navigate into or select as a "folder". An
+		  // Open-file dialog filtered to the .docset extension is what actually
+		  // lets the user click the bundle once and choose it, the same way
+		  // you'd "open" a .app.
+		  If Indexer.IsRunning Or MBSIndexer.MBSIsRunning Then
+		    MessageBox("Indexing is already running.")
+		    Return
+		  End If
+
+		  Var docsetType As New FileType
+		  docsetType.Name = "MBS Docset"
+		  docsetType.Extensions = "docset"
+
+		  Var dlg As New OpenFileDialog
+		  dlg.PromptText = "Select the MBS.docset bundle"
+		  dlg.Filter = docsetType
+
+		  Var folder As FolderItem = dlg.ShowModal
+		  If folder = Nil Then Return // user cancelled
+
+		  If Not LooksLikeDocset(folder) Then
+		    MessageBox("That doesn't look like a .docset bundle — expected a " _
+		      + "Contents/Resources/docSet.dsidx file inside it.")
+		    Return
+		  End If
+
+		  Var win As New IndexProgressWindow
+		  win.Title = "Indexing MBS Docs"
+		  win.TitleLabel.Text = "Indexing MBS Docs"
+		  win.Show
+		  Var adapter As New IndexerProgressAdapter
+		  adapter.Win = win
+		  MBSIndexer.StartIndex(folder, adapter)
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function LooksLikeDocset(folder As FolderItem) As Boolean
+		  // Each .Child() call can return Nil if the expected path segment
+		  // doesn't exist (e.g. the user picked something that isn't actually a
+		  // docset) — chaining them without checking crashes with a
+		  // NilObjectException instead of hitting the friendly error message.
+		  If folder = Nil Then Return False
+		  Var contents As FolderItem = folder.Child("Contents")
+		  If contents = Nil Then Return False
+		  Var resources As FolderItem = contents.Child("Resources")
+		  If resources = Nil Then Return False
+		  Var idx As FolderItem = resources.Child("docSet.dsidx")
+		  Return idx <> Nil And idx.Exists
+		End Function
+	#tag EndMethod
+
 
 	#tag Property, Flags = &h21
 		Private Shared mDB As SQLiteDatabase
