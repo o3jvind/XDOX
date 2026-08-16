@@ -43,6 +43,14 @@ Public Class XDOXSession
 		    + "answer honestly: the documentation context you were given, or your general training — " _
 		    + "never claim to have searched the web or read a forum." _
 		    + EndOfLine + EndOfLine _
+		    + "When your own training knowledge and the documentation context disagree, or when the " _
+		    + "context doesn't mention something you recall from training, always defer to the context " _
+		    + "and say what it — or its absence — actually shows. Training-knowledge recall is not a " _
+		    + "substitute for checking the context: a class, method, or property you 'remember' but that " _
+		    + "isn't in the context is not confirmed to exist, and a plausible-sounding API name from " _
+		    + "training is exactly how a wrong answer happens. If the context doesn't contain something, " _
+		    + "say so plainly instead of filling the gap from memory." _
+		    + EndOfLine + EndOfLine _
 		    + "When the user pushes back on something you said, do not reflexively agree. Re-check the " _
 		    + "context: if it supports your answer, stand by it and point to the documentation; if you " _
 		    + "were wrong, admit it in one sentence and give the correction. Never invent supporting " _
@@ -59,6 +67,9 @@ Public Class XDOXSession
 		  // (the burger test): this model ignores instructions buried before a
 		  // large Context block — style rules only stick when they come last.
 		  Return "Final reminders (these override any habits from your training): " _
+		    + "Never answer from training-knowledge memory alone — verify every class, method, and " _
+		    + "property name against the Context above, even when you feel certain. If it isn't in the " _
+		    + "Context, say you don't know rather than naming something you merely recall. " _
 		    + "Start your reply directly with the substance — never 'You're absolutely right', " _
 		    + "'Great question' or other praise or validation. " _
 		    + "JSON strings use double quotes only — never single quotes. " _

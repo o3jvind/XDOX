@@ -111,7 +111,7 @@ Protected Module Retrieval
 		  For i As Integer = 0 To chunkIDs.LastIndex
 		    ftsScores.Add(0.0)
 		  Next
-		  Var safe As String = SanitizeQuery(query)
+		  Var safe As String = BuildMatchQuery(query)
 		  If safe <> "" Then
 		    Try
 		      Var ftsMap As New Dictionary
@@ -143,7 +143,7 @@ Protected Module Retrieval
 		  Var combined() As Double
 		  For i As Integer = 0 To cosScores.LastIndex
 		    Var score As Double = cosScores(i) * 0.7 + ftsScores(i) * 0.3
-		    Var className As String = ExtractClassName(titles(i))
+		    Var className As String = ExtractClassName(titles(i), texts(i))
 		    If className <> "" And queryLower.IndexOf(className.Lowercase) >= 0 Then
 		      score = score + kClassNameBoost
 		    End If
@@ -272,7 +272,7 @@ Protected Module Retrieval
 		  Var results() As RetrievalResult
 		  If db = Nil Then Return results
 
-		  Var safe As String = SanitizeQuery(query)
+		  Var safe As String = BuildMatchQuery(query)
 		  If safe = "" Then Return results
 
 		  Try
@@ -409,7 +409,7 @@ Protected Module Retrieval
 		  For i As Integer = 0 To ids.LastIndex
 		    ftsScores.Add(0.0)
 		  Next
-		  Var safe As String = SanitizeQuery(query)
+		  Var safe As String = BuildMatchQuery(query)
 		  If safe <> "" Then
 		    Try
 		      Var ftsMap As New Dictionary
@@ -466,7 +466,7 @@ Protected Module Retrieval
 		  Var results() As RetrievalResult
 		  If db = Nil Then Return results
 
-		  Var safe As String = SanitizeQuery(query)
+		  Var safe As String = BuildMatchQuery(query)
 		  If safe = "" Then Return results
 
 		  Try
@@ -524,7 +524,7 @@ Protected Module Retrieval
 		  End If
 		  mCacheLock.Leave
 
-		  Var emb As MemoryBlock = Embedder.FetchEmbedding(query, 5)
+		  Var emb As MemoryBlock = Embedder.FetchEmbedding(query, Embedder.kTaskPrefixQuery, 5)
 		  If emb <> Nil Then
 		    mCacheLock.Enter
 		    mLastEmbQuery = query
@@ -723,6 +723,12 @@ Protected Module Retrieval
 		  specials.Add(":")
 		  specials.Add("\")
 		  specials.Add("/")
+		  specials.Add("-")
+		  specials.Add("?")
+		  specials.Add("!")
+		  specials.Add(".")
+		  specials.Add(",")
+		  specials.Add(";")
 		  For Each ch As String In specials
 		    s = s.ReplaceAll(ch, " ")
 		  Next
@@ -738,23 +744,66 @@ Protected Module Retrieval
 		End Function
 	#tag EndMethod
 
+	#tag Method, Flags = &h0
+		Function BuildMatchQuery(query As String) As String
+		  // FTS5's default MATCH is an implicit AND across all tokens, so a
+		  // conversational query ("does xojo have a native way to show a
+		  // webpage") almost never matches terse reference text and returns
+		  // zero rows. OR-joining lets any token match, so BM25 can still
+		  // contribute a signal for natural-language questions.
+		  Var safe As String = SanitizeQuery(query)
+		  If safe = "" Then Return ""
+		  Return String.FromArray(safe.Split(" "), " OR ")
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h21
-		Private Function ExtractClassName(title As String) As String
-		  // Chunk titles are near-universally "ClassName.member..." (both the
-		  // RST-derived Xojo-doc titles and the MBS docset's ItemTitle text
-		  // follow this shape). Whole-page or FAQ-style titles with no "." are
-		  // left as "" — nothing meaningful to boost against there. Only
-		  // class-name-shaped prefixes are used (letters/digits, at least 4
-		  // chars) so a title like "How to....Question?" doesn't turn "How"
-		  // into a bogus boost target.
+		Private Function ExtractClassName(title As String, chunkText As String) As String
+		  // Two title conventions coexist in chunks: the MBS docset's ItemTitle
+		  // text is "ClassName.member..." (dot) — near-universally a real class
+		  // member, safe to trust from the title alone. Native Xojo-doc titles
+		  // (RST-derived) use "ClassName > member..." (arrow) instead, e.g.
+		  // "DesktopHTMLViewer > Overview" — but the SAME arrow shape is also
+		  // used by IDE-guide/tutorial sections that aren't classes at all
+		  // ("Toolbar > Common members" is the Xojo IDE's own toolbar, unrelated
+		  // to the DesktopToolbar control; "Library > Introduction", "Inspector",
+		  // "Navigator" are IDE panels). Trusting the arrow form from the title
+		  // alone re-creates the exact bug this boost exists to prevent — a
+		  // generic page out-ranking the real API chunk — just via IDE guides
+		  // instead of tutorials. So an arrow-form candidate is only accepted
+		  // when corroborated by the CHUNK TEXT: either this chunk IS the
+		  // class's canonical overview page ("ClassName > Overview" titles have
+		  // prose bodies, not a repeated dotted signature line, so they're
+		  // checked by title suffix), or the chunk is a real member page, whose
+		  // body's second line repeats "ClassName.MemberName" — e.g.
+		  // "DesktopHTMLViewer > Loadurl" is followed by
+		  // "DesktopHTMLViewer.LoadURL" — which guide/tutorial chunks never do.
 		  Var dotPos As Integer = title.IndexOf(".")
-		  If dotPos < 4 Then Return ""
-		  Var candidate As String = title.Left(dotPos)
+		  Var arrowPos As Integer = title.IndexOf(" > ")
+		  Var sepPos As Integer = dotPos
+		  Var isArrow As Boolean = False
+		  If arrowPos >= 0 And (dotPos < 0 Or arrowPos < dotPos) Then
+		    sepPos = arrowPos
+		    isArrow = True
+		  End If
+		  If sepPos < 4 Then Return ""
+		  Var candidate As String = title.Left(sepPos)
 		  For i As Integer = 0 To candidate.Length - 1
 		    Var ch As String = candidate.Middle(i, 1)
 		    Var isAlnum As Boolean = (ch >= "a" And ch <= "z") Or (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9")
 		    If Not isAlnum Then Return ""
 		  Next
+
+		  If isArrow Then
+		    Var isOverviewTitle As Boolean = title = candidate + " > Overview"
+		    Var bodyLine As String = chunkText
+		    Var nl As Integer = bodyLine.IndexOf(EndOfLine)
+		    If nl >= 0 Then bodyLine = bodyLine.Middle(nl + 1)
+		    bodyLine = bodyLine.Trim
+		    Var isMemberSignature As Boolean = bodyLine.Left(candidate.Length + 1) = candidate + "."
+		    If Not isOverviewTitle And Not isMemberSignature Then Return ""
+		  End If
+
 		  Return candidate
 		End Function
 	#tag EndMethod

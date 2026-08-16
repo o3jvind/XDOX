@@ -22,11 +22,17 @@ Protected Module Embedder
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function EmbedBatch(texts() As String, timeoutSeconds As Integer = 30) As MemoryBlock()
+		Function EmbedBatch(texts() As String, taskPrefix As String, timeoutSeconds As Integer = 30) As MemoryBlock()
 		  // POST /v1/embeddings on the local embedding server. Returns one
 		  // float32-LE MemoryBlock per input (Nil per slot on failure) or an empty
 		  // array when the whole request failed. SendSync blocks the CALLING
 		  // thread only — fine on IndexerThread, keep timeouts short on Main.
+		  //
+		  // taskPrefix: nomic-embed-text-v1.5 is trained on Nomic's asymmetric
+		  // task-instruction convention and requires it for good retrieval —
+		  // pass kTaskPrefixDocument for indexed chunk/note text, kTaskPrefixQuery
+		  // for a user's search query. Always pass one; there is no "no prefix"
+		  // mode because the model was never trained on unprefixed text.
 		  Var result() As MemoryBlock
 		  If texts.Count = 0 Then Return result
 
@@ -37,8 +43,9 @@ Protected Module Embedder
 		    // nomic's context is hard-capped at 2048 tokens (llama-server clamps
 		    // --ctx-size to the model's training limit). Truncate dense chunks:
 		    // a truncated vector still retrieves; BM25 covers the full text.
+		    // Truncate BEFORE prefixing so the prefix never eats into the budget.
 		    If t.Length > kMaxEmbedChars Then t = t.Left(kMaxEmbedChars)
-		    input.Add(t)
+		    input.Add(taskPrefix + t)
 		  Next
 		  body.Value("input") = input
 
@@ -61,10 +68,10 @@ Protected Module Embedder
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function FetchEmbedding(text As String, timeoutSeconds As Integer = 5) As MemoryBlock
+		Function FetchEmbedding(text As String, taskPrefix As String, timeoutSeconds As Integer = 5) As MemoryBlock
 		  Var texts() As String
 		  texts.Add(text)
-		  Var results() As MemoryBlock = EmbedBatch(texts, timeoutSeconds)
+		  Var results() As MemoryBlock = EmbedBatch(texts, taskPrefix, timeoutSeconds)
 		  If results.Count = 0 Then Return Nil
 		  Return results(0)
 		End Function
@@ -122,6 +129,12 @@ Protected Module Embedder
 	#tag EndConstant
 
 	#tag Constant, Name = kEmbeddingDim, Type = Double, Dynamic = False, Default = \"768", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kTaskPrefixDocument, Type = String, Dynamic = False, Default = \"search_document: ", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kTaskPrefixQuery, Type = String, Dynamic = False, Default = \"search_query: ", Scope = Public
 	#tag EndConstant
 
 

@@ -670,7 +670,7 @@ Public Module DBHelper
 		  If note = Nil Then Return
 		  If Not ModelManager.EmbedServerReady Then Return
 		  Var embeddedText As String = note.Title + Chr(10) + note.Body
-		  Var emb As MemoryBlock = Embedder.FetchEmbedding(embeddedText, 5)
+		  Var emb As MemoryBlock = Embedder.FetchEmbedding(embeddedText, Embedder.kTaskPrefixDocument, 5)
 		  If emb <> Nil Then StoreNoteEmbedding(note.Id, emb, embeddedText, conn)
 		End Sub
 	#tag EndMethod

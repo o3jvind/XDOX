@@ -216,7 +216,7 @@ Inherits Thread
 		    rs.Close
 		    If ids.Count = 0 Then Exit
 
-		    Var embs() As MemoryBlock = Embedder.EmbedBatch(texts)
+		    Var embs() As MemoryBlock = Embedder.EmbedBatch(texts, Embedder.kTaskPrefixDocument)
 		    If embs.Count = 0 Then
 		      // Whole batch failed — likely one oversized/poisonous input. Retry
 		      // each chunk individually so one bad chunk doesn't sink seven good
@@ -230,7 +230,7 @@ Inherits Thread
 		      db.BeginTransaction
 		      mTransactionOpen = True
 		      For k As Integer = 0 To ids.LastIndex
-		        Var single As MemoryBlock = Embedder.FetchEmbedding(texts(k), 30)
+		        Var single As MemoryBlock = Embedder.FetchEmbedding(texts(k), Embedder.kTaskPrefixDocument, 30)
 		        If single <> Nil Then
 		          DBHelper.StoreChunkEmbedding(ids(k), single, db)
 		        Else
