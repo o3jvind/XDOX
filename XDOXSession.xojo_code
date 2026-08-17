@@ -379,11 +379,28 @@ Public Class XDOXSession
 
 		  context = Retrieval.BuildContext(retrievalQuery, conn)
 		  requestMessage = Retrieval.BuildNotesPreamble(retrievalQuery, conn) + userMessage
+
+		  // BuildContext embeds a short marker instead of its full
+		  // third-party-only note when every retrieved chunk is MBS
+		  // documentation — see its comment. Pull the marker back OUT of the
+		  // context (the model shouldn't see raw internal markup) and append
+		  // the actual instruction text after ClosingReminders instead, where
+		  // "burger test" instructions actually stick. Confirmed live: the
+		  // full note text placed at the top of Context (before this fix)
+		  // did NOT stop "No, not with a native Xojo control" as an opener.
+		  Var allThirdParty As Boolean = context.IndexOf(Retrieval.kAllThirdPartyMarker) >= 0
+		  If allThirdParty Then
+		    context = context.ReplaceAll(Retrieval.kAllThirdPartyMarker + EndOfLine + EndOfLine, "")
+		  End If
+
 		  sysPrompt = BaseInstructions()
 		  If context <> "" Then
 		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + "Context:" + EndOfLine + context
 		  End If
 		  sysPrompt = sysPrompt + EndOfLine + EndOfLine + ClosingReminders()
+		  If allThirdParty Then
+		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + Retrieval.AllThirdPartyNote()
+		  End If
 
 		  // Token guard: drop RAG context first, then trim oldest history pairs.
 		  historyDropCount = 0

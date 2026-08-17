@@ -384,6 +384,13 @@ Protected Module Retrieval
 		      res.Text = TargetPlatformLabel(titles(ai)) + texts(ai)
 		      res.Source = "docs"
 		      res.Score = combined(ai)
+		      // MBS Docset chunks document a paid, third-party plugin (see
+		      // sources(ai), which carries the raw DB source unlike Source
+		      // above) — not part of Xojo itself. BuildContext uses this to
+		      // warn the model when NO native-docs chunk made it into the
+		      // context, so it doesn't imply a third-party-only answer is the
+		      // only option Xojo offers. See BuildContext's kAllThirdPartyNote.
+		      res.IsThirdParty = sources(ai).Left(13) = "MBS Docset > "
 		      results.Add(res)
 		    Next
 		  Next
@@ -763,6 +770,36 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Function AllThirdPartyNote() As String
+		  // A plain method, not a #tag Constant — CLAUDE.md documents that a
+		  // literal comma inside a Constant's default value silently
+		  // truncates the string at the project-file level in .xojo_code
+		  // too, with no known escape fix (unlike .xojo_window's \x2C). An
+		  // ordinary string literal built via concatenation inside a method
+		  // body doesn't have this bug (see BaseInstructions/
+		  // ClosingReminders, which already do this for long prompt text).
+		  //
+		  // Public (not Private): XDOXSession.PrepareRequest calls this
+		  // directly to build its OWN copy of this text to append after
+		  // ClosingReminders — see BuildContext's comment on why the copy
+		  // embedded in the context string itself is stripped back out and
+		  // never actually sent to the model from there.
+		  Return "IMPORTANT: every result below is THIRD-PARTY (MBS plugin) documentation — " _
+		    + "none of these results are part of Xojo itself. You do NOT know whether Xojo " _
+		    + "has a native (built-in) way to do this — the search did not find one, but " _
+		    + "that does NOT mean one doesn't exist; it may simply not have been named in " _
+		    + "this conversation. This is a hard rule: do NOT say 'Xojo does not have a " _
+		    + "native way' or similar, and do NOT open a reply to 'can I do this with a " _
+		    + "native control' with 'No' — instead say you found third-party (MBS) " _
+		    + "documentation for this, and that you cannot confirm whether a native " _
+		    + "alternative exists unless the user names a specific native class to check."
+		End Function
+	#tag EndMethod
+
+	#tag Constant, Name = kAllThirdPartyMarker, Type = String, Dynamic = False, Default = \"\x5B__ALL_THIRD_PARTY__\x5D", Scope = Public
+	#tag EndConstant
+
+	#tag Method, Flags = &h0
 		Function MatchStatus(query As String, conn As SQLiteDatabase = Nil) As String
 		  // Hard gate, not advice: a system-prompt marker telling the model "no
 		  // match, say so honestly" was implemented first and confirmed live to
@@ -825,7 +862,43 @@ Protected Module Retrieval
 		  Next
 		  If results.Count = 0 Then Return ""
 
+		  // If EVERY result is third-party (MBS plugin) documentation, the
+		  // model has no native-Xojo chunk to check for a built-in
+		  // alternative against — confirmed live: asked about a native way to
+		  // do something already being discussed via an MBS class, the model
+		  // said "no native way" and pointed only at MBS, when a native
+		  // alternative (DesktopHTMLViewer) existed but was never retrieved
+		  // because it was never named in the conversation. There is no
+		  // scalable way to curate "MBS class X's native equivalent is Y" —
+		  // MBS has a huge catalog, much of it built precisely because Xojo
+		  // has NO native equivalent, so guessing one exists would trade one
+		  // hallucination for another. The honest, scalable fix is to make
+		  // the GAP explicit instead of guessing either way: tell the model
+		  // plainly that only third-party documentation was found, so it
+		  // must say it cannot confirm whether a native alternative exists,
+		  // rather than asserting "no native way" as if the search had been
+		  // exhaustive.
+		  Var allThirdParty As Boolean = True
+		  For Each r As RetrievalResult In results
+		    If Not r.IsThirdParty Then
+		      allThirdParty = False
+		      Exit
+		    End If
+		  Next
+
+		  // A short marker, not the full note text, is embedded here — the
+		  // model largely ignores instructions placed BEFORE a large Context
+		  // block (see XDOXSession.ClosingReminders' "burger test" comment),
+		  // confirmed live: putting the full AllThirdPartyNote() text at the
+		  // top of the docs context did NOT stop the model from opening a
+		  // reply with "No, not with a native Xojo control." XDOXSession.
+		  // PrepareRequest strips this marker back out of context and
+		  // appends the actual note text to sysPrompt AFTER ClosingReminders
+		  // instead, where instructions actually stick.
 		  Var sb As String = "[Xojo Docs]" + EndOfLine
+		  If allThirdParty Then
+		    sb = sb + kAllThirdPartyMarker + EndOfLine + EndOfLine
+		  End If
 		  For di As Integer = 0 To results.Count - 1
 		    If di > 0 Then sb = sb + EndOfLine + "---" + EndOfLine + EndOfLine
 		    sb = sb + results(di).Text

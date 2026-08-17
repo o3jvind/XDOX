@@ -17,5 +17,9 @@ Public Class RetrievalResult
 		Score As Double
 	#tag EndProperty
 
+	#tag Property, Flags = &h0
+		IsThirdParty As Boolean
+	#tag EndProperty
+
 End Class
 #tag EndClass
