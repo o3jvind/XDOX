@@ -76,7 +76,22 @@ Public Class XDOXSession
 		    + "In Xojo code an embedded double quote is written by doubling it ("""") — " _
 		    + "never with a backslash escape like \"". " _
 		    + "Objects must be created with New before use. " _
-		    + "Only state what the documentation context supports."
+		    + "Only state what the documentation context supports. " _
+		    + "Xojo targets multiple platforms (Desktop, Web, iOS, Console, Android) with " _
+		    + "DIFFERENT, INCOMPATIBLE class libraries — a class name starting with 'Desktop' " _
+		    + "only exists in desktop apps, 'Web' only in web apps, and so on; they are not " _
+		    + "interchangeable, and a Context chunk tagged '[Web-target class]', " _
+		    + "'[Desktop-target class]' etc. is telling you exactly which platform that class " _
+		    + "belongs to. If the user asks about a DESKTOP app (or doesn't say, which defaults " _
+		    + "to desktop) and the only Context you have is tagged for a DIFFERENT target, the " _
+		    + "correct answer is 'No, not with a desktop-native class — that class is Web-target " _
+		    + "only' or similar, followed by a plain 'I don't know of a desktop equivalent in the " _
+		    + "provided context' if none is present. This is a hard rule, not a suggestion: " _
+		    + "NEVER open with 'Yes' and then walk it back with 'however' — if the only supporting " _
+		    + "class is tagged for the wrong platform, the answer starts with No, not Yes. Do not " _
+		    + "resolve the mismatch by inventing a class name that sounds right for the platform " _
+		    + "the user asked about (e.g. a plausible-sounding 'WebBrowser' or similar) — say " _
+		    + "plainly that the context doesn't show a match for that platform instead."
 		End Function
 	#tag EndMethod
 

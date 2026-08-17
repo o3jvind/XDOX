@@ -381,7 +381,7 @@ Protected Module Retrieval
 		      Var ai As Integer = srcMap.Value(cidx)
 		      Var res As New RetrievalResult
 		      res.Title = titles(ai)
-		      res.Text = texts(ai)
+		      res.Text = TargetPlatformLabel(titles(ai)) + texts(ai)
 		      res.Source = "docs"
 		      res.Score = combined(ai)
 		      results.Add(res)
@@ -1004,6 +1004,70 @@ Protected Module Retrieval
 		  End If
 
 		  Return candidate
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function TargetPlatformLabel(title As String) As String
+		  // Xojo's native-doc class names carry their target platform as a
+		  // naming prefix (DesktopButton, WebPage, iOSCountdownPicker,
+		  // ConsoleApplication) — a real, documented Xojo convention, not
+		  // something inferred here. Confirmed live: asking "does Xojo have a
+		  // native way of showing a webpage" retrieved WebPage (a Web-target
+		  // server-side page class whose GotoURL/ExecuteJavaScript methods
+		  // read as plausible cosine matches for "webpage") with nothing in
+		  // the delivered chunk text distinguishing it from a desktop-app
+		  // answer — the model then answered as if WebPage were a general
+		  // solution, no caveat. XDOX is a general Xojo assistant, not
+		  // Desktop-only (don't exclude Web/iOS/Console classes from
+		  // retrieval — the user may genuinely be asking about them) — so the
+		  // fix is to make the target explicit to the model rather than to
+		  // hide non-Desktop results. Cheap prefix check on the class name
+		  // already extracted via ExtractClassName's title parsing; only
+		  // labels when a prefix is recognized, so cross-platform classes
+		  // (FolderItem, String, Dictionary — the majority of chunks) are
+		  // left unlabeled rather than guessed at.
+		  Var sepPos As Integer = title.IndexOf(".")
+		  Var arrowPos As Integer = title.IndexOf(" > ")
+		  If arrowPos >= 0 And (sepPos < 0 Or arrowPos < sepPos) Then sepPos = arrowPos
+		  If sepPos < 4 Then Return ""
+		  Var candidate As String = title.Left(sepPos)
+
+		  // Exact-case prefix checks — NOT the string >=/<= operators, which
+		  // are case-insensitive by default in Xojo (see the "d" >= "A" And
+		  // "d" <= "Z" pitfall documented for Retrieval.ExtractClassName's
+		  // isAlnum check) and would otherwise make e.g. "desktopfoo" match
+		  // "Desktop" too. StartsWithExact does an ordinal (Asc-based)
+		  // per-character compare instead.
+		  If StartsWithExact(candidate, "Desktop") Then Return "[Desktop-target class] "
+		  If StartsWithExact(candidate, "iOS") Then Return "[iOS-target class] "
+		  If StartsWithExact(candidate, "Console") Then Return "[Console-target class] "
+		  If StartsWithExact(candidate, "Android") Then Return "[Android-target class] "
+		  // "Web" alone would also match "WebService"/"WebFile" (still
+		  // Web-target, fine) but must not match unrelated words that merely
+		  // start with those letters — Xojo's own naming convention already
+		  // guarantees a target-prefixed class name is followed by an
+		  // uppercase letter (WebPage, not "Webpage"), so require that too.
+		  If StartsWithExact(candidate, "Web") And candidate.Length > 3 Then
+		    Var nextCode As Integer = candidate.Middle(3, 1).Asc
+		    If nextCode >= 65 And nextCode <= 90 Then Return "[Web-target class — server-side web app, not desktop] "
+		  End If
+		  Return ""
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function StartsWithExact(s As String, prefix As String) As Boolean
+		  // Case-SENSITIVE prefix check — String.Left(n) = "..." uses Xojo's
+		  // default case-insensitive comparison, which would match
+		  // "desktopfoo" against "Desktop" too. Xojo class names always use
+		  // the documented capitalization, so an exact match is correct here.
+		  If s.Length < prefix.Length Then Return False
+		  Var lhs As String = s.Left(prefix.Length)
+		  For i As Integer = 0 To prefix.Length - 1
+		    If lhs.Middle(i, 1).Asc <> prefix.Middle(i, 1).Asc Then Return False
+		  Next
+		  Return True
 		End Function
 	#tag EndMethod
 
