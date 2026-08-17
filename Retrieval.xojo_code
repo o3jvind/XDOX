@@ -157,13 +157,36 @@ Protected Module Retrieval
 		  // asking about a specific named class is a much stronger signal than
 		  // embedding proximity can give here, so it overrides a close cosine
 		  // race rather than just nudging it. Keep in sync with XMCP SemanticSearch.
+		  //
+		  // While scoring: also note which chunk (if any) IS the matched
+		  // class's own "ClassName > Overview" page — overviewIdx, guaranteed
+		  // into the results below rather than left to compete on score. A
+		  // flat boost here was tried first and measured insufficient: it's
+		  // applied identically to EVERY chunk of the matched class, so it
+		  // gives the Overview chunk no relative edge over that SAME class's
+		  // specific member chunks. Confirmed live: asking about
+		  // DesktopHTMLViewer by name boosted all of LinuxWebViewMBS,
+		  // Newwindow, Setfocus etc. equally, and the terse ~800-char Overview
+		  // chunk (whose text is the only one that actually states the class
+		  // exists — "Renders HTML and provides basic navigation features")
+		  // still lost to member chunks with a stronger FTS leg even after a
+		  // +0.2 Overview-only boost on top of the flat +0.15 (measured
+		  // combined 0.826 vs. the winning member chunk's 0.932) — the
+		  // per-chunk cosine/FTS spread on real queries is wide enough that no
+		  // single flat number is safe to tune to. The model then had no
+		  // chunk telling it the class is real and hallucinated that Xojo has
+		  // no native equivalent — despite the user naming the exact class.
+		  // Deterministic inclusion (like PinnedMigrationResults) sidesteps
+		  // the scoring race entirely instead of trying to out-tune it.
 		  Var queryLower As String = query.Lowercase
 		  Var combined() As Double
+		  Var overviewIdx As Integer = -1
 		  For i As Integer = 0 To cosScores.LastIndex
 		    Var score As Double = cosScores(i) * 0.7 + ftsScores(i) * 0.3
 		    Var className As String = ExtractClassName(titles(i), texts(i))
-		    If className <> "" And queryLower.IndexOf(className.Lowercase) >= 0 Then
+		    If className <> "" And QueryNamesClass(queryLower, className.Lowercase) Then
 		      score = score + kClassNameBoost
+		      If overviewIdx < 0 And titles(i) = className + " > Overview" Then overviewIdx = i
 		    End If
 		    combined.Add(score)
 		  Next
@@ -205,6 +228,25 @@ Protected Module Retrieval
 		    includedIDs.Value(chunkIDs(idx)) = True
 		    finalIdxs.Add(idx)
 		  Next
+
+		  // Guarantee the matched class's own Overview chunk survives into
+		  // finalIdxs even if it lost the score race above — see the comment
+		  // on overviewIdx. If it's not already in (the common case — that's
+		  // the bug this exists to fix), bump the weakest current slot rather
+		  // than growing past maxResults, so this can't blow the token budget
+		  // BuildContext/PrepareRequest sized around a fixed result count.
+		  If overviewIdx >= 0 And Not includedIDs.HasKey(chunkIDs(overviewIdx)) Then
+		    If finalIdxs.Count < maxResults Then
+		      finalIdxs.Add(overviewIdx)
+		    Else
+		      Var weakestPos As Integer = 0
+		      For p As Integer = 1 To finalIdxs.LastIndex
+		        If combined(finalIdxs(p)) < combined(finalIdxs(weakestPos)) Then weakestPos = p
+		      Next
+		      finalIdxs(weakestPos) = overviewIdx
+		    End If
+		    includedIDs.Value(chunkIDs(overviewIdx)) = True
+		  End If
 
 		  // Reranking: a cross-encoder pass over the already-selected candidates
 		  // that reorders by real query-document relevance instead of trusting
@@ -962,6 +1004,39 @@ Protected Module Retrieval
 		  End If
 
 		  Return candidate
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function QueryNamesClass(queryLower As String, classNameLower As String) As Boolean
+		  // A plain IndexOf substring check matches "WebView" inside
+		  // "desktopwkwebviewcontrolmbs" — confirmed live: asking about
+		  // DesktopWKWebViewControlMBS pulled in WebView's chunks (a
+		  // completely unrelated Xojo Web-target class) because "webview" is
+		  // a literal substring of the longer class name, which then handed
+		  // the model an off-topic "WebView > Overview" chunk it stitched
+		  // into inventing a nonexistent "WebBrowser" control. Requiring word
+		  // boundaries (neither the character before nor after the match may
+		  // be alphanumeric) keeps the intended case — a class name appearing
+		  // as its own word/token in a natural-language question — while
+		  // rejecting one class name that merely happens to be a substring of
+		  // another, longer one. Keep in sync with XMCP SemanticSearch.
+		  Var pos As Integer = queryLower.IndexOf(classNameLower)
+		  While pos >= 0
+		    Var beforeOk As Boolean = (pos = 0) Or Not IsAlnumChar(queryLower.Middle(pos - 1, 1))
+		    Var afterPos As Integer = pos + classNameLower.Length
+		    Var afterOk As Boolean = (afterPos >= queryLower.Length) Or Not IsAlnumChar(queryLower.Middle(afterPos, 1))
+		    If beforeOk And afterOk Then Return True
+		    pos = queryLower.IndexOf(pos + 1, classNameLower)
+		  Wend
+		  Return False
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function IsAlnumChar(ch As String) As Boolean
+		  If ch = "" Then Return False
+		  Return (ch >= "a" And ch <= "z") Or (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9")
 		End Function
 	#tag EndMethod
 
