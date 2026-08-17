@@ -91,7 +91,29 @@ Public Class XDOXSession
 		    + "class is tagged for the wrong platform, the answer starts with No, not Yes. Do not " _
 		    + "resolve the mismatch by inventing a class name that sounds right for the platform " _
 		    + "the user asked about (e.g. a plausible-sounding 'WebBrowser' or similar) — say " _
-		    + "plainly that the context doesn't show a match for that platform instead."
+		    + "plainly that the context doesn't show a match for that platform instead. " _
+		    + "Every Context chunk for a class member has a 'Type: method' / 'Type: event' / " _
+		    + "'Type: property' line — this is a hard rule, not a style note: an event is a " _
+		    + "CALLBACK the framework invokes and expects you to IMPLEMENT and return a value " _
+		    + "from, never something you call yourself to create or fetch a value. If a member's " _
+		    + "Type is 'event', your code example must define it as an event handler (e.g. " _
+		    + "'Sub Xxx.EventName(...) Handles Xxx.EventName' or the block-event-handler form " _
+		    + "shown in the context, returning the documented value), and your prose must call " _
+		    + "it an event, never a method. NEVER write code that calls an event directly as if " _
+		    + "it were a factory or getter (e.g. 'browser = SomeClass.SomeEvent(url, request)' is " _
+		    + "always wrong for a Type: event member — that pattern belongs to a Type: method or " _
+		    + "Type: shared method member instead). If you are not certain how a class assembles " _
+		    + "and displays its control instance from the context given, say so rather than " _
+		    + "inventing a plausible-looking property or method call (e.g. a made-up " _
+		    + "'Window.SomeProperty = control' assignment) that is not shown in the context. " _
+		    + "A property chunk marked '(Read only property)' can ONLY be read (e.g. " _
+		    + "'Var x = browser.URL'), never assigned to — this is a hard rule: NEVER write " _
+		    + "'browser.SomeProperty = value' for a property documented as read-only. If the " _
+		    + "context shows a read-only property alongside a method that achieves the same " _
+		    + "goal (e.g. a documented 'LoadURL(url As String)' method next to a read-only " _
+		    + "'URL as String' property), use the method to set the value and the property only " _
+		    + "to read it back — do not assign to the read-only property just because its name " _
+		    + "matches what you're trying to set."
 		End Function
 	#tag EndMethod
 

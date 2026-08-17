@@ -695,6 +695,73 @@ Protected Module Retrieval
 		End Function
 	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Function ChunkSearchLimit(query As String) As Integer
+		  // A query that names a specific Xojo class (PascalCase word, e.g.
+		  // "DesktopWKWebViewControlMBS") is asking about ONE class's API
+		  // surface, not a broad topic — the normal kDefaultChunkLimit (4) can
+		  // fill up entirely with that class's own chunks (via kClassNameBoost
+		  // in HybridSearchChunks) and still miss the one member that actually
+		  // answers the question. Confirmed live: asking "how do I show a
+		  // webpage with DesktopWKWebViewControlMBS" filled all 4 slots with
+		  // CreateWebView (a Type: event, not callable directly), the
+		  // read-only URL property, setUsePrivateBrowsing, and an unrelated
+		  // WebPage chunk — LoadURL, the actual method that solves this, never
+		  // made the cut. The model then alternated between misusing
+		  // CreateWebView and misusing URL across repeated tries, because
+		  // LoadURL was never in front of it to use instead. Widening the
+		  // result count specifically when a class is named gives that
+		  // class's other members (methods, not just the ones that happened
+		  // to score highest) more room to survive dedup and reach the
+		  // reranker. MUST be called with the exact same query by both
+		  // MatchStatus and BuildContext — SearchChunks's cache key includes
+		  // the limit, so a mismatch here would double the actual search work
+		  // and break MatchStatus's "SearchChunks caches, so the real search
+		  // here is the same one BuildContext performs" assumption.
+		  //
+		  // Reuses the same PascalCase heuristic as SymbolCheck's
+		  // ExtractPascalCaseWords (starts uppercase, all alnum, has a
+		  // lowercase letter — rules out ALL-CAPS acronyms like "URL" or
+		  // "HTML" which are common English/tech words, not class names) —
+		  // kept as an independent, smaller check here rather than exposing
+		  // SymbolCheck's private helper, since the two exist for different
+		  // reasons (retrieval breadth vs. a reply-side hallucination check).
+		  For Each word As String In query.Split(" ")
+		    Var w As String = word
+		    While w.Length > 0 And Not IsAlnumQueryChar(w.Left(1))
+		      w = w.Middle(1)
+		    Wend
+		    While w.Length > 0 And Not IsAlnumQueryChar(w.Right(1))
+		      w = w.Left(w.Length - 1)
+		    Wend
+		    If w.Length < kMinClassWordLength Then Continue
+		    Var firstCode As Integer = w.Left(1).Asc
+		    If firstCode < 65 Or firstCode > 90 Then Continue // must start uppercase
+		    Var hasLower As Boolean = False
+		    Var allAlnum As Boolean = True
+		    For i As Integer = 1 To w.Length - 1
+		      Var ch As String = w.Middle(i, 1)
+		      If Not IsAlnumQueryChar(ch) Then
+		        allAlnum = False
+		        Exit
+		      End If
+		      Var code As Integer = ch.Asc
+		      If code >= 97 And code <= 122 Then hasLower = True
+		    Next
+		    If allAlnum And hasLower Then Return kWidenedChunkLimit
+		  Next
+		  Return kDefaultChunkLimit
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function IsAlnumQueryChar(ch As String) As Boolean
+		  If ch = "" Then Return False
+		  Var code As Integer = ch.Asc
+		  Return (code >= 48 And code <= 57) Or (code >= 65 And code <= 90) Or (code >= 97 And code <= 122)
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h0
 		Function MatchStatus(query As String, conn As SQLiteDatabase = Nil) As String
 		  // Hard gate, not advice: a system-prompt marker telling the model "no
@@ -718,9 +785,9 @@ Protected Module Retrieval
 		  Var pinned() As RetrievalResult = PinnedMigrationResults(query, conn)
 		  If pinned.Count > 0 Then Return kStatusSupported // curated pin is trusted deterministically
 
-		  Const kChunkSearchLimit As Integer = 4
-		  Call SearchChunks(query, kChunkSearchLimit, conn) // populates mRerankScoreCache as a side effect
-		  Var rerankBestScore As Double = GetCachedRerankScore(query, kChunkSearchLimit)
+		  Var chunkSearchLimit As Integer = ChunkSearchLimit(query)
+		  Call SearchChunks(query, chunkSearchLimit, conn) // populates mRerankScoreCache as a side effect
+		  Var rerankBestScore As Double = GetCachedRerankScore(query, chunkSearchLimit)
 
 		  If rerankBestScore < 0.0 Then Return kStatusUnavailable
 		  If rerankBestScore < Reranker.kNoMatchThreshold Then
@@ -743,7 +810,7 @@ Protected Module Retrieval
 		  // already checked MatchStatus <> kStatusNoMatch — this function no
 		  // longer gates on the reranker score itself (see MatchStatus).
 		  Var pinned() As RetrievalResult = PinnedMigrationResults(query, conn)
-		  Var docResults() As RetrievalResult = SearchChunks(query, 4, conn)
+		  Var docResults() As RetrievalResult = SearchChunks(query, ChunkSearchLimit(query), conn)
 
 		  Var results() As RetrievalResult
 		  For Each p As RetrievalResult In pinned
@@ -1179,6 +1246,15 @@ Protected Module Retrieval
 	#tag EndConstant
 
 	#tag Constant, Name = kClassNameBoost, Type = Double, Dynamic = False, Default = \"0.15", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kDefaultChunkLimit, Type = Double, Dynamic = False, Default = \"4", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kWidenedChunkLimit, Type = Double, Dynamic = False, Default = \"7", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kMinClassWordLength, Type = Double, Dynamic = False, Default = \"4", Scope = Private
 	#tag EndConstant
 
 	#tag Constant, Name = kStatusSupported, Type = String, Dynamic = False, Default = \"supported", Scope = Public
