@@ -15,7 +15,7 @@ Inherits Thread
 		  // main-thread handle (WAL allows the concurrent reader).
 		  Var conn As SQLiteDatabase = DBHelper.OpenConnection
 		  Try
-		    Session.PrepareRequest(mUserMessage, mHistory, conn, mSysPrompt, mRequestMessage, mHistoryDropCount)
+		    Session.PrepareRequest(mUserMessage, mHistory, conn, mSysPrompt, mRequestMessage, mHistoryDropCount, mMatchStatus, mContext)
 		  Catch e As RuntimeException
 		    App.AppendDebugLog("ChatPrepThread: " + e.Message + EndOfLine)
 		    mFailed = True
@@ -32,7 +32,7 @@ Inherits Thread
 		  // (already-async) streaming connection. BeginStreaming drops the call
 		  // if mGeneration has moved on (user stopped / resent).
 		  If Session <> Nil Then
-		    Session.BeginStreaming(mGeneration, mUserMessage, mSysPrompt, mRequestMessage, mHistoryDropCount, mFailed)
+		    Session.BeginStreaming(mGeneration, mUserMessage, mSysPrompt, mRequestMessage, mHistoryDropCount, mFailed, mMatchStatus, mContext)
 		  End If
 		End Sub
 	#tag EndEvent
@@ -74,6 +74,14 @@ Inherits Thread
 
 	#tag Property, Flags = &h21
 		Private mHistoryDropCount As Integer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mMatchStatus As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mContext As String
 	#tag EndProperty
 
 	#tag Property, Flags = &h21

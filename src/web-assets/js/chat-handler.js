@@ -24,6 +24,18 @@ function appendToken(text) {
   scrollToBottom();
 }
 
+function showCannedResponse(text) {
+  // Deterministic non-streamed replies (e.g. the retrieval no-match gate)
+  // must render as one atomic operation — calling appendToken(text) then
+  // finalizeMessage() back-to-back with no real time between them (unlike
+  // normal streaming, which is naturally paced by network-arriving SSE
+  // chunks) risks the two separate EvaluateJavaScript calls racing in the
+  // WebView's JS queue, observed live as the rendered bubble being cut off
+  // mid-word. A single call has no such race.
+  appendToken(text);
+  finalizeMessage();
+}
+
 function finalizeMessage() {
   // Always clear the thinking spinner — on an early stop during request prep,
   // no assistant bubble was ever created (appendToken never ran), so this is

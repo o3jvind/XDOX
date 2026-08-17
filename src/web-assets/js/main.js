@@ -263,7 +263,7 @@ function setNotesSearchScope(scope) {
 
 // ── Backend / model management ────────────────────────────────────────────
 // Xojo calls: receiveBackendState(state, detail), receiveCatalog(catalog,
-// installed, selectedId), receiveDownloadProgress(id, pct),
+// installed, selectedId, embedNeeded, rerankNeeded), receiveDownloadProgress(id, pct),
 // receiveDownloadDone(id, ok, err), receiveEmbedCrashed()
 
 let modelCatalog = [];
@@ -272,6 +272,12 @@ let selectedModelId = '';
 let modelDownloads = {};   // id -> pct
 let overlayAutoOpened = false;
 let embedDownloading = false;  // fixed search model (id 'embedding') in flight
+let rerankDownloading = false; // fixed reranker model (id 'reranker') in flight
+// Tracks which fixed models are still outstanding so the combined disclosure
+// note only hides once BOTH are confirmed installed, regardless of which
+// download happens to finish first.
+let embedModelDone = false;
+let rerankModelDone = false;
 
 function setBackendStatus(text, cls) {
   const el = document.getElementById('backendStatus');
@@ -329,23 +335,29 @@ function closeModelOverlay() {
   overlayAutoOpened = false;
 }
 
-function receiveCatalog(catalog, installed, selectedId, embedNeeded) {
+function receiveCatalog(catalog, installed, selectedId, embedNeeded, rerankNeeded) {
   modelCatalog = catalog || [];
   modelInstalled = installed || {};
   selectedModelId = selectedId || '';
-  updateEmbedNote(!!embedNeeded);
+  embedModelDone = !embedNeeded;
+  rerankModelDone = !rerankNeeded;
+  updateEmbedNote();
   renderModelList();
 }
 
 // One-time disclosure: the first chat-model choice also triggers the fixed
-// search-model download. Hidden once that model is on disk.
-function updateEmbedNote(needed) {
+// search-model and reranker-model downloads. Hidden once BOTH are on disk —
+// tracked separately (embedModelDone/rerankModelDone) so whichever of the
+// two finishes first doesn't prematurely hide the note while the other is
+// still missing.
+function updateEmbedNote() {
   const note = document.getElementById('embedNote');
   if (!note) return;
-  if (needed) {
+  if (!embedModelDone || !rerankModelDone) {
     note.textContent = 'First-time setup: along with your chat model, XDOX '
-      + 'downloads a small search model (nomic-embed-text, 146 MB) that powers '
-      + 'semantic search. This happens only once — later launches download nothing.';
+      + 'downloads two small fixed models that power search — a search model '
+      + '(nomic-embed-text, 146 MB) and a reranker (Qwen3-Reranker, 640 MB). '
+      + 'This happens only once — later launches download nothing.';
     note.style.display = '';
   } else {
     note.style.display = 'none';
@@ -447,13 +459,25 @@ function selectModel(id) {
 }
 
 function receiveDownloadProgress(id, pct) {
-  // The fixed search model has no catalog card — its progress lives in the
-  // status bar's search-tier slot instead.
+  // The fixed search and reranker models have no catalog card — their
+  // progress lives in the status bar's search-tier slot instead.
   if (id === 'embedding') {
     embedDownloading = true;
     const el = document.getElementById('semanticStatus');
     if (el) {
       el.textContent = 'Downloading search model… ' + Math.round(pct) + '%';
+      el.className = 'semantic-status';
+    }
+    return;
+  }
+  if (id === 'reranker') {
+    rerankDownloading = true;
+    const el = document.getElementById('semanticStatus');
+    // Don't stomp the embedding model's own progress text if both happen to
+    // be downloading at once — whichever posts last wins the slot, which is
+    // harmless since both resolve to the same "warming up" toast.
+    if (el) {
+      el.textContent = 'Downloading reranker… ' + Math.round(pct) + '%';
       el.className = 'semantic-status';
     }
     return;
@@ -469,7 +493,7 @@ function receiveSemanticState(state) {
   const el = document.getElementById('semanticStatus');
   if (!el) return;
   // Don't let a keyword-tier ping wipe the download progress text.
-  if (state !== 'semantic' && embedDownloading) return;
+  if (state !== 'semantic' && (embedDownloading || rerankDownloading)) return;
   if (state === 'semantic') {
     el.textContent = 'Semantic search';
     el.className = 'semantic-status ready';
@@ -480,17 +504,30 @@ function receiveSemanticState(state) {
 }
 
 function receiveDownloadDone(id, ok, err) {
-  // The search model must never fall through to the chat-model logic below —
-  // it finishes first (it is far smaller) and would get auto-selected.
+  // The search and reranker models must never fall through to the
+  // chat-model logic below — they finish first (far smaller) and would get
+  // auto-selected.
   if (id === 'embedding') {
     embedDownloading = false;
     if (ok) {
-      updateEmbedNote(false);
+      embedModelDone = true;
+      updateEmbedNote();
       showToast('Search model installed — semantic search is warming up');
     } else {
       const el = document.getElementById('semanticStatus');
       if (el) { el.textContent = 'Keyword search'; el.className = 'semantic-status'; }
       if (err && err !== 'cancelled') showToast('Search model download failed: ' + err);
+    }
+    return;
+  }
+  if (id === 'reranker') {
+    rerankDownloading = false;
+    if (ok) {
+      rerankModelDone = true;
+      updateEmbedNote();
+      showToast('Reranker installed — retrieval quality is improving');
+    } else {
+      if (err && err !== 'cancelled') showToast('Reranker download failed: ' + err);
     }
     return;
   }

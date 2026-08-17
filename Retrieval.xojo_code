@@ -46,7 +46,7 @@ Protected Module Retrieval
 		    results = KeywordSearchChunks(query, limit, db, activeVersion)
 		  Else
 		    RecordSemanticState(True)
-		    results = HybridSearchChunks(query, queryEmb, limit, db, activeVersion)
+		    results = HybridSearchChunks(query, queryEmb, limit, db, activeVersion, cacheKey, generationAtMiss)
 		    If results.Count = 0 Then results = KeywordSearchChunks(query, limit, db, activeVersion)
 		  End If
 
@@ -66,7 +66,7 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function HybridSearchChunks(query As String, queryEmb As MemoryBlock, maxResults As Integer, db As SQLiteDatabase, activeVersion As String) As RetrievalResult()
+		Private Function HybridSearchChunks(query As String, queryEmb As MemoryBlock, maxResults As Integer, db As SQLiteDatabase, activeVersion As String, cacheKey As String, generationAtMiss As Integer) As RetrievalResult()
 		  Var results() As RetrievalResult
 
 		  // Cosine over every embedded chunk for the active version plus the
@@ -115,15 +115,33 @@ Protected Module Retrieval
 		  If safe <> "" Then
 		    Try
 		      Var ftsMap As New Dictionary
-		      Var ftsRS As RowSet = db.SelectSQL("SELECT rowid, bm25(chunks_fts) AS bm25_score FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 200", safe)
+		      // ORDER BY is load-bearing, not cosmetic: BuildMatchQuery OR-joins
+		      // every sanitized token, so a conversational query ("How do I read
+		      // a JSON file in Xojo?") can MATCH tens of thousands of rows on
+		      // common words alone. Without an explicit order, SQLite returns an
+		      // ARBITRARY 200-row slice under LIMIT — confirmed live to silently
+		      // drop the actually-relevant chunks (real BM25 scores -12.9 to
+		      // -18.6, i.e. strong matches) while keeping irrelevant ones that
+		      // merely survived the truncation (-9.0 to -10.8), which then won
+		      // the hybrid ranking because their FTS leg normalized to ~0.99
+		      // while the true match's leg silently defaulted to 0.0 (never
+		      // found in the truncated slice at all). ORDER BY the raw bm25()
+		      // score (ascending — more negative is better) BEFORE the LIMIT
+		      // guarantees the 200 kept rows are the 200 best matches, not an
+		      // arbitrary subset.
+		      Var ftsRS As RowSet = db.SelectSQL("SELECT rowid, bm25(chunks_fts) AS bm25_score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT 200", safe)
 		      While Not ftsRS.AfterLastRow
 		        Var norm As Double = 1.0 / (1.0 + Exp(ftsRS.Column("bm25_score").DoubleValue * 0.5))
 		        ftsMap.Value(ftsRS.Column("rowid").IntegerValue) = norm
 		        ftsRS.MoveToNextRow
 		      Wend
 		      ftsRS.Close
+		      // NOT CDbl(Variant) — confirmed live to mis-parse a Double-typed
+		      // Dictionary Variant under this system's locale (comma decimal
+		      // separator), inflating e.g. 0.097 to ~9.7e14. DoubleValue reads
+		      // the Variant's binary double directly, no string round-trip.
 		      For i As Integer = 0 To chunkIDs.LastIndex
-		        If ftsMap.HasKey(chunkIDs(i)) Then ftsScores(i) = CDbl(ftsMap.Value(chunkIDs(i)))
+		        If ftsMap.HasKey(chunkIDs(i)) Then ftsScores(i) = ftsMap.Value(chunkIDs(i)).DoubleValue
 		      Next
 		    Catch e As DatabaseException
 		      // FTS query failed — vector-only scores.
@@ -181,12 +199,79 @@ Protected Module Retrieval
 		    Var src As String = sources(idx)
 		    Var sc As Double = combined(idx)
 		    If sourceLastScore.HasKey(src) Then
-		      If Abs(sc - CDbl(sourceLastScore.Value(src))) < kDedupeScoreDelta Then Continue
+		      If Abs(sc - sourceLastScore.Value(src).DoubleValue) < kDedupeScoreDelta Then Continue
 		    End If
 		    sourceLastScore.Value(src) = sc
 		    includedIDs.Value(chunkIDs(idx)) = True
 		    finalIdxs.Add(idx)
 		  Next
+
+		  // Reranking: a cross-encoder pass over the already-selected candidates
+		  // that reorders by real query-document relevance instead of trusting
+		  // cosine+BM25 alone. Score-threshold and rank-gap "no match" signals
+		  // were tested against 16 real queries and both showed full
+		  // distributional overlap between answerable and unanswerable
+		  // questions — the reranker's relevance_score is the one signal that
+		  // showed real separation (0/8 false positives, 1/8 false negative at
+		  // threshold 0.9). Pure fallback if the server is down or the model
+		  // isn't installed: finalIdxs keeps its existing cosine+BM25 order and
+		  // no score is cached (BuildContext treats a cache miss as "no rerank
+		  // signal available", never injects the no-match marker).
+		  //
+		  // Cached (not a bare field) and keyed by the SAME cacheKey SearchChunks
+		  // uses for mCache: SearchChunks's early cache-hit return skips this
+		  // function entirely on a repeat query, and concurrent ChatPrepThread
+		  // workers can run overlapping searches for different queries — a bare
+		  // module field would go stale or race exactly like mLastEmb/mLastEmbQuery
+		  // would without their own lock (see GetQueryEmbedding).
+		  Var rerankBestScore As Double = -1.0
+		  If finalIdxs.Count > 0 And ModelManager.RerankServerReady Then
+		    Var candidateTexts() As String
+		    For Each idx As Integer In finalIdxs
+		      candidateTexts.Add(texts(idx))
+		    Next
+		    Var rerankScores() As Double = Reranker.RerankBatch(query, candidateTexts)
+		    If rerankScores.Count = finalIdxs.Count Then
+		      // Pair each finalIdxs slot with its rerank score, then sort
+		      // descending — a small array (<= maxResults*2), insertion sort is
+		      // plenty and keeps this dependency-free.
+		      Var order() As Integer
+		      For i As Integer = 0 To finalIdxs.LastIndex
+		        order.Add(i)
+		      Next
+		      For i As Integer = 1 To order.LastIndex
+		        Var key As Integer = order(i)
+		        Var keyScore As Double = rerankScores(key)
+		        Var j As Integer = i - 1
+		        While j >= 0 And rerankScores(order(j)) < keyScore
+		          order(j + 1) = order(j)
+		          j = j - 1
+		        Wend
+		        order(j + 1) = key
+		      Next
+		      Var rerankedIdxs() As Integer
+		      Var bestScore As Double = -2.0
+		      For Each pos As Integer In order
+		        rerankedIdxs.Add(finalIdxs(pos))
+		        If rerankScores(pos) > bestScore Then bestScore = rerankScores(pos)
+		      Next
+		      finalIdxs = rerankedIdxs
+		      rerankBestScore = bestScore
+		    End If
+		  End If
+		  If rerankBestScore >= 0.0 Then
+		    mCacheLock.Enter
+		    // Same generation guard as SearchChunks's own mCache write — a
+		    // ClearCache that landed mid-search must not let a stale score get
+		    // written back under a cacheKey a reindex/version-switch has since
+		    // invalidated.
+		    If mCacheGeneration = generationAtMiss Then
+		      If mRerankScoreCache = Nil Then mRerankScoreCache = New Dictionary
+		      If mRerankScoreCache.Count >= kCacheMaxEntries Then mRerankScoreCache = New Dictionary
+		      mRerankScoreCache.Value(cacheKey) = rerankBestScore
+		    End If
+		    mCacheLock.Leave
+		  End If
 
 		  // Neighbour expansion for high-cosine hits.
 		  Var neighbourIdxs() As Integer
@@ -413,14 +498,19 @@ Protected Module Retrieval
 		  If safe <> "" Then
 		    Try
 		      Var ftsMap As New Dictionary
-		      Var ftsRS As RowSet = db.SelectSQL("SELECT rowid, bm25(notes_fts) AS s FROM notes_fts WHERE notes_fts MATCH ? LIMIT 100", safe)
+		      // ORDER BY is load-bearing here too — see HybridSearchChunks's FTS
+		      // leg for the full explanation of why an unordered LIMIT silently
+		      // drops the actually-relevant rows on a broad OR-matched query.
+		      Var ftsRS As RowSet = db.SelectSQL("SELECT rowid, bm25(notes_fts) AS s FROM notes_fts WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) LIMIT 100", safe)
 		      While Not ftsRS.AfterLastRow
 		        ftsMap.Value(ftsRS.Column("rowid").IntegerValue) = 1.0 / (1.0 + Exp(ftsRS.Column("s").DoubleValue * 0.5))
 		        ftsRS.MoveToNextRow
 		      Wend
 		      ftsRS.Close
+		      // See HybridSearchChunks: NOT CDbl(Variant) — mis-parses a
+		      // Double-typed Dictionary Variant under this system's locale.
 		      For i As Integer = 0 To rowids.LastIndex
-		        If ftsMap.HasKey(rowids(i)) Then ftsScores(i) = CDbl(ftsMap.Value(rowids(i)))
+		        If ftsMap.HasKey(rowids(i)) Then ftsScores(i) = ftsMap.Value(rowids(i)).DoubleValue
 		      Next
 		    Catch e As DatabaseException
 		      App.AppendDebugLog("Retrieval (FTS score merge): " + e.Message + EndOfLine)
@@ -535,6 +625,70 @@ Protected Module Retrieval
 		End Function
 	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Function GetCachedRerankScore(query As String, limit As Integer) As Double
+		  // Reads the best rerank score HybridSearchChunks stashed for this exact
+		  // SearchChunks call (same cacheKey formula, same lock). -1 means "no
+		  // signal" — either the query hasn't been searched via SearchChunks yet
+		  // this call (BuildContext always searches first, so this only happens
+		  // if SearchChunks returned early some other way), the reranker never
+		  // ran (server down, keyword-only fallback), or a ClearCache landed
+		  // between the search and this read.
+		  Var cacheKey As String = DBHelper.GetActiveVersion + "|" + query + "|" + limit.ToString
+		  mCacheLock.Enter
+		  Var result As Double = -1.0
+		  If mRerankScoreCache <> Nil And mRerankScoreCache.HasKey(cacheKey) Then
+		    // NOT CDbl(Variant) — on this system CDbl mis-parses a Double-typed
+		    // Variant as if it were a locale-formatted string (Danish locale:
+		    // comma decimal separator), turning e.g. 0.097 into ~9.69e14.
+		    // DoubleValue reads the Variant's binary double directly, with no
+		    // string round-trip. Confirmed live: raw.StringValue correctly showed
+		    // "9.69e-2" while CDbl(raw) returned 969339683651924.125 for the same
+		    // Variant. mCache's own RetrievalResult scores never hit this because
+		    // they're never boxed through a Dictionary Variant + CDbl round-trip.
+		    result = mRerankScoreCache.Value(cacheKey).DoubleValue
+		  End If
+		  mCacheLock.Leave
+		  Return result
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function MatchStatus(query As String, conn As SQLiteDatabase = Nil) As String
+		  // Hard gate, not advice: a system-prompt marker telling the model "no
+		  // match, say so honestly" was implemented first and confirmed live to
+		  // NOT reliably stop the model from writing fabricated example code
+		  // right after honestly saying a feature doesn't exist — a small local
+		  // model treats "admit uncertainty" and "don't then speculate" as
+		  // separable instincts, and satisfying the first doesn't suppress the
+		  // second. Converting the reranker's signal into CONTROL FLOW (this
+		  // status gates whether XDOXSession ever opens a generation request at
+		  // all) is the fix: the model cannot fabricate code in a turn it never
+		  // receives. Call this before SearchChunks/BuildContext — it's cheap
+		  // (SearchChunks caches, so the real search here is the same one
+		  // BuildContext performs), and the caller only needs to build/send a
+		  // full request on kStatusSupported.
+		  //
+		  // Returns kStatusSupported, kStatusNoMatch, or kStatusUnavailable
+		  // (reranker down/not installed — falls back to ordinary cosine+BM25
+		  // chat rather than gating, since the reranker is an improvement layered
+		  // on an already-functional pipeline, not a required dependency).
+		  Var pinned() As RetrievalResult = PinnedMigrationResults(query, conn)
+		  If pinned.Count > 0 Then Return kStatusSupported // curated pin is trusted deterministically
+
+		  Const kChunkSearchLimit As Integer = 4
+		  Call SearchChunks(query, kChunkSearchLimit, conn) // populates mRerankScoreCache as a side effect
+		  Var rerankBestScore As Double = GetCachedRerankScore(query, kChunkSearchLimit)
+
+		  If rerankBestScore < 0.0 Then Return kStatusUnavailable
+		  If rerankBestScore < Reranker.kNoMatchThreshold Then
+		    App.AppendDebugLog("Retrieval.MatchStatus: NoMatch for """ + query + """ (best rerank score " + Format(rerankBestScore, "0.000") + ")" + EndOfLine)
+		    Return kStatusNoMatch
+		  End If
+		  Return kStatusSupported
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h0
 		Function BuildContext(query As String, conn As SQLiteDatabase = Nil) As String
 		  // Docs only — notes are injected into the user message instead
@@ -543,7 +697,9 @@ Protected Module Retrieval
 		  // Pinned legacy→modern mapping chunks go first, then search hits
 		  // that aren't the same chunk.
 		  // conn lets a worker thread (ChatPrepThread) pass its OWN connection so
-		  // reads never share the main-thread handle.
+		  // reads never share the main-thread handle. Caller is expected to have
+		  // already checked MatchStatus <> kStatusNoMatch — this function no
+		  // longer gates on the reranker score itself (see MatchStatus).
 		  Var pinned() As RetrievalResult = PinnedMigrationResults(query, conn)
 		  Var docResults() As RetrievalResult = SearchChunks(query, 4, conn)
 
@@ -664,6 +820,7 @@ Protected Module Retrieval
 		  // generationAtMiss check in SearchChunks.
 		  mCacheLock.Enter
 		  mCache = Nil
+		  mRerankScoreCache = Nil
 		  mCacheGeneration = mCacheGeneration + 1
 		  mCacheLock.Leave
 		End Sub
@@ -850,6 +1007,10 @@ Protected Module Retrieval
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mRerankScoreCache As Dictionary
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mLastEmbQuery As String
 	#tag EndProperty
 
@@ -879,6 +1040,15 @@ Protected Module Retrieval
 	#tag EndConstant
 
 	#tag Constant, Name = kClassNameBoost, Type = Double, Dynamic = False, Default = \"0.15", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kStatusSupported, Type = String, Dynamic = False, Default = \"supported", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kStatusNoMatch, Type = String, Dynamic = False, Default = \"no_match", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kStatusUnavailable, Type = String, Dynamic = False, Default = \"unavailable", Scope = Public
 	#tag EndConstant
 
 

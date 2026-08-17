@@ -122,8 +122,10 @@ Implements XDOXSessionDelegate
 		    RefreshVersions
 
 		  Case "getModels"
-		    // 4th arg: does the picker need the one-time embedding-download notice?
-		    EvaluateJavaScript("receiveCatalog(" + ModelManager.CatalogJSON + "," + ModelManager.InstalledModelsJSON + "," + JSONEscape(ModelManager.SelectedModelId) + "," + If(ModelManager.EmbeddingModelInstalled, "false", "true") + ");")
+		    // 4th/5th args: is each fixed model (embedding/reranker) still
+		    // missing? The JS side only hides the combined disclosure note once
+		    // both report installed.
+		    EvaluateJavaScript("receiveCatalog(" + ModelManager.CatalogJSON + "," + ModelManager.InstalledModelsJSON + "," + JSONEscape(ModelManager.SelectedModelId) + "," + If(ModelManager.EmbeddingModelInstalled, "false", "true") + "," + If(ModelManager.RerankModelInstalled, "false", "true") + ");")
 
 		  Case "downloadModel"
 		    ModelManager.DownloadModel(Body.StringValue)
@@ -169,6 +171,15 @@ Implements XDOXSessionDelegate
 	#tag Method, Flags = &h0
 		Sub OnDone()
 		  EvaluateJavaScript("finalizeMessage()")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub OnCannedResponse(text As String)
+		  // Deterministic replies (retrieval no-match gate) render as one atomic
+		  // JS call — see showCannedResponse's comment for why separate
+		  // OnToken+OnDone calls aren't used here.
+		  EvaluateJavaScript("showCannedResponse(" + JSONEscape(text) + ")")
 		End Sub
 	#tag EndMethod
 

@@ -10,6 +10,10 @@ Public Interface XDOXSessionDelegate
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Sub OnCannedResponse(text As String)
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Sub OnError(message As String)
 	#tag EndMethod
 

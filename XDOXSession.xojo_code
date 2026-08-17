@@ -134,9 +134,26 @@ Public Class XDOXSession
 		    mHistory.Add(New Pair("user", mCurrentUserMessage))
 		    mHistory.Add(New Pair("assistant", mCurrentReply))
 		  End If
+
+		  // Debug-log-only diagnostic (see SymbolCheck.FindUnverifiedSymbols):
+		  // does the finished reply cite a class-name-shaped symbol that never
+		  // appeared anywhere in the retrieved context? A DIFFERENT failure
+		  // mode than the no-match gate — this can fire even when retrieval
+		  // found genuinely relevant context (confirmed live: a real ZXing/
+		  // barcode match, but the model invented "ZXingWriterMBS", which
+		  // isn't in the docs). No user-visible effect yet — validating the
+		  // detector's accuracy before deciding whether/how to act on it.
+		  If mCurrentReply <> "" Then
+		    Var unverified() As String = SymbolCheck.FindUnverifiedSymbols(mCurrentReply, mCurrentContext)
+		    If unverified.Count > 0 Then
+		      App.AppendDebugLog("XDOXSession DIAG unverified symbols in reply to """ + mCurrentUserMessage + """: " + String.FromArray(unverified, ", ") + EndOfLine)
+		    End If
+		  End If
+
 		  mCurrentUserMessage = ""
 		  mCurrentReply = ""
 		  mSSEBuffer = ""
+		  mCurrentContext = ""
 		  IsResponding = False
 		  CleanupConnection
 		  If mDelegate <> Nil Then mDelegate.OnDone
@@ -288,7 +305,7 @@ Public Class XDOXSession
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub PrepareRequest(userMessage As String, history() As String, conn As SQLiteDatabase, ByRef sysPrompt As String, ByRef requestMessage As String, ByRef historyDropCount As Integer)
+		Sub PrepareRequest(userMessage As String, history() As String, conn As SQLiteDatabase, ByRef sysPrompt As String, ByRef requestMessage As String, ByRef historyDropCount As Integer, ByRef matchStatus As String, ByRef context As String)
 		  // Runs on the ChatPrepThread worker — blocking HTTP is fine here.
 		  // Fresh RAG context per query — the system prompt is rebuilt every
 		  // message, which is why history lives here and not on the server.
@@ -300,7 +317,16 @@ Public Class XDOXSession
 		  // or the shared DB handle, so nothing here races the main thread. The
 		  // computed historyDropCount is applied to mHistory later on the main
 		  // thread in BeginStreaming.
-		  Var context As String = Retrieval.BuildContext(userMessage, conn)
+		  matchStatus = Retrieval.MatchStatus(userMessage, conn)
+		  If matchStatus = Retrieval.kStatusNoMatch Then
+		    // Hard gate: no context to build, no chat-model request to prepare.
+		    // BeginStreaming short-circuits before opening a connection — see its
+		    // NoMatch branch for why (Retrieval.MatchStatus has the full
+		    // rationale for why this is control flow, not another instruction).
+		    Return
+		  End If
+
+		  context = Retrieval.BuildContext(userMessage, conn)
 		  requestMessage = Retrieval.BuildNotesPreamble(userMessage, conn) + userMessage
 		  sysPrompt = BaseInstructions()
 		  If context <> "" Then
@@ -324,7 +350,7 @@ Public Class XDOXSession
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub BeginStreaming(generation As Integer, userMessage As String, sysPrompt As String, requestMessage As String, historyDropCount As Integer, failed As Boolean)
+		Sub BeginStreaming(generation As Integer, userMessage As String, sysPrompt As String, requestMessage As String, historyDropCount As Integer, failed As Boolean, matchStatus As String, context As String)
 		  // Runs on the main thread (ChatPrepThread.UserInterfaceUpdate). Applies
 		  // the history trim the worker computed, then opens the async stream.
 		  //
@@ -344,6 +370,24 @@ Public Class XDOXSession
 		    Return
 		  End If
 
+		  If matchStatus = Retrieval.kStatusNoMatch Then
+		    // Hard gate (see Retrieval.MatchStatus): no chat-model request is
+		    // opened at all for a NoMatch query — the model cannot fabricate an
+		    // answer in a generation turn it never receives. OnCannedResponse
+		    // renders the deterministic reply as ONE atomic JS call — separate
+		    // OnToken+OnDone calls with no real time between them (unlike normal
+		    // streaming, naturally paced by SSE arrival) raced in the WebView's
+		    // JS queue and truncated the rendered text mid-word, confirmed live.
+		    // Same history-commit/state-reset FinishResponse does, minus its
+		    // OnDone call (OnCannedResponse's single call covers rendering AND
+		    // finalizing on the JS side).
+		    mHistory.Add(New Pair("user", userMessage))
+		    mHistory.Add(New Pair("assistant", kNoMatchResponse))
+		    IsResponding = False
+		    If mDelegate <> Nil Then mDelegate.OnCannedResponse(kNoMatchResponse)
+		    Return
+		  End If
+
 		  // Apply the token-guard trim now, on the owning thread.
 		  Var drop As Integer = historyDropCount
 		  If drop > mHistory.Count Then drop = mHistory.Count
@@ -354,6 +398,7 @@ Public Class XDOXSession
 		  mCurrentUserMessage = userMessage
 		  mCurrentReply = ""
 		  mSSEBuffer = ""
+		  mCurrentContext = context
 
 		  mConn = New URLConnection
 		  AddHandler mConn.ReceivingProgressed, AddressOf OnReceivingProgressed
@@ -462,6 +507,20 @@ Public Class XDOXSession
 	#tag Property, Flags = &h21
 		Private mSSEBuffer As String
 	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mCurrentContext As String
+	#tag EndProperty
+
+	// NB: no literal comma in this default value — confirmed live that a
+	// comma inside a .xojo_code #tag Constant String default silently
+	// truncates the string at compile time (the IDE parses the constant's
+	// default-value list itself as comma-delimited, same underlying cause as
+	// .xojo_window's documented \x2C-for-comma rule, but this is the first
+	// constant in this codebase to ever contain a literal comma, so it was
+	// never caught before). Use em dashes or split sentences instead.
+	#tag Constant, Name = kNoMatchResponse, Type = String, Dynamic = False, Default = \"I couldn't find closely matching Xojo documentation for that — so I can't verify that it exists or provide reliable Xojo code for it. Try rephrasing the question — or asking about a documented Xojo feature.", Scope = Private
+	#tag EndConstant
 
 End Class
 #tag EndClass

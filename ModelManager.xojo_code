@@ -13,10 +13,12 @@ Protected Module ModelManager
 		    SendBackendState("no-model", "")
 		  Else
 		    EnsureEmbeddingModel
+		    EnsureRerankModel
 		    StartServer(id)
 		  End If
 
 		  StartEmbedServer
+		  StartRerankServer
 		End Sub
 	#tag EndMethod
 
@@ -37,6 +39,14 @@ Protected Module ModelManager
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Function RerankBaseURL() As String
+		  // Port 8093 on purpose: XMCP hardcodes this address too, same reasoning
+		  // as EmbedBaseURL — one reranker server serves both apps.
+		  Return "http://127.0.0.1:" + kRerankPort
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Function EmbedServerHealthy(timeoutSeconds As Integer = 2) As Boolean
 		  // One synchronous /health probe. Callers own any retry/wait loop
 		  // (IndexerThread loops with Me.Sleep between probes).
@@ -46,6 +56,21 @@ Protected Module ModelManager
 		    // up — don't drop into the debugger on every probe.
 		    #Pragma BreakOnExceptions False
 		    Call conn.SendSync("GET", EmbedBaseURL() + "/health", timeoutSeconds)
+		    #Pragma BreakOnExceptions Default
+		    Return conn.HTTPStatusCode = 200
+		  Catch e As RuntimeException
+		    Return False
+		  End Try
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function RerankServerHealthy(timeoutSeconds As Integer = 2) As Boolean
+		  // Mirrors EmbedServerHealthy — one synchronous /health probe.
+		  Try
+		    Var conn As New URLConnection
+		    #Pragma BreakOnExceptions False
+		    Call conn.SendSync("GET", RerankBaseURL() + "/health", timeoutSeconds)
 		    #Pragma BreakOnExceptions Default
 		    Return conn.HTTPStatusCode = 200
 		  Catch e As RuntimeException
@@ -99,6 +124,42 @@ Protected Module ModelManager
 		  info.Value("filename") = Embedder.kEmbedModelFile
 		  info.Value("bytes") = CType(146146432, Int64)
 		  info.Value("sha256") = "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7"
+		  info.Value("lastProgressTick") = System.Ticks
+		  mDownloads.Value(conn) = info
+
+		  conn.Send("GET", url, dest)
+		  StartStallWatchdog
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub EnsureRerankModel()
+		  // The reranker model is a fixed dependency (Qwen3-Reranker-0.6B), not a
+		  // catalog choice — same "disclosed in the picker = informed consent"
+		  // pattern as EnsureEmbeddingModel. Use Voodisss's conversion, NOT
+		  // ggml-org's — the latter is a known-broken GGUF missing the
+		  // cls.output.weight classifier tensor and returns near-zero, low-signal
+		  // scores regardless of actual relevance.
+		  Var f As FolderItem = ModelsFolder().Child(Reranker.kRerankModelFile)
+		  If f <> Nil And f.Exists And f.Length > 0 Then Return
+
+		  If mDownloads = Nil Then mDownloads = New Dictionary
+		  If IsModelBusy("reranker") Then Return // already downloading or verifying
+
+		  App.AppendDebugLog("ModelManager: downloading reranker model from HF" + EndOfLine)
+		  Var url As String = kHFBase + "/Voodisss/Qwen3-Reranker-0.6B-GGUF-llama_cpp/resolve/main/Qwen3-Reranker-0.6B.Q8_0.gguf"
+		  Var dest As FolderItem = ModelsFolder().Child(Reranker.kRerankModelFile + ".part")
+
+		  Var conn As New URLConnection
+		  AddHandler conn.FileReceived, AddressOf OnFileReceived
+		  AddHandler conn.ReceivingProgressed, AddressOf OnReceivingProgressed
+		  AddHandler conn.Error, AddressOf OnDownloadError
+
+		  Var info As New Dictionary
+		  info.Value("modelId") = "reranker"
+		  info.Value("filename") = Reranker.kRerankModelFile
+		  info.Value("bytes") = CType(639153344, Int64)
+		  info.Value("sha256") = "6ddab39a36c6c87fdb76f0e5f05657012d5dbc97034c0983c157f17ef9f34d55"
 		  info.Value("lastProgressTick") = System.Ticks
 		  mDownloads.Value(conn) = info
 
@@ -276,14 +337,23 @@ Protected Module ModelManager
 		  StartStallWatchdog
 
 		  // The user's first chat-model download doubles as consent for the fixed
-		  // embedding model (disclosed in the picker) — fetch both in parallel.
+		  // embedding and reranker models (disclosed in the picker) — fetch all
+		  // three in parallel.
 		  EnsureEmbeddingModel
+		  EnsureRerankModel
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
 		Function EmbeddingModelInstalled() As Boolean
 		  Var f As FolderItem = ModelsFolder().Child(Embedder.kEmbedModelFile)
+		  Return f <> Nil And f.Exists And f.Length > 0
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function RerankModelInstalled() As Boolean
+		  Var f As FolderItem = ModelsFolder().Child(Reranker.kRerankModelFile)
 		  Return f <> Nil And f.Exists And f.Length > 0
 		End Function
 	#tag EndMethod
@@ -609,6 +679,7 @@ Protected Module ModelManager
 		    If backup.Exists Then backup.Delete
 		    SendToJS("receiveDownloadDone(" + JSEscape(modelId) + ",true,"""");")
 		    If modelId = "embedding" Then StartEmbedServer
+		    If modelId = "reranker" Then StartRerankServer
 
 		  Catch e As RuntimeException
 		    App.AppendDebugLog("ModelManager.InstallVerifiedFile: move exception: " + e.Message + EndOfLine)
@@ -1207,9 +1278,280 @@ Protected Module ModelManager
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Sub StartRerankServer()
+		  If mRerankTask <> Nil And mRerankTask.isRunning Then Return
+		  If mRerankAdopted And RerankServerHealthy(1) Then Return
+
+		  Var modelFi As FolderItem = ModelsFolder().Child(Reranker.kRerankModelFile)
+		  If modelFi = Nil Or Not modelFi.Exists Then
+		    App.AppendDebugLog("ModelManager: reranker model not installed yet — no-match detection stays off" + EndOfLine)
+		    Return
+		  End If
+
+		  // A stale reranker server from a previous debug session may already own
+		  // port 8093 — adopt it rather than double-bind, same as the chat/embed
+		  // servers. Same stale-regime check as the embedding server's ProbeSlotCtx
+		  // use: a server started with llama-server's tiny default --batch-size
+		  // (512) would otherwise be silently adopted forever, returning HTTP 500
+		  // "input too large" on every real rerank call (hit live). Checks for
+		  // the CURRENT --ctx-size (4096) specifically, not just "> 512" — an
+		  // old build that tried 40960 and crashed on launch never got this far,
+		  // but a hypothetical future value change should still force a replace.
+		  Var probe As String = ProbeExistingServerOn(RerankBaseURL(), modelFi.NativePath)
+		  If probe = "adopt" Then
+		    If ProbeSlotCtx(RerankBaseURL()) = 4096 Then
+		      mRerankAdopted = True
+		      App.AppendDebugLog("ModelManager: adopted existing reranker server on port " + kRerankPort + EndOfLine)
+		      OnRerankServerBecameReady
+		      StartAdoptedRerankWatchdog
+		      Return
+		    End If
+		    App.AppendDebugLog("ModelManager: stale reranker server runs the old small-batch regime — replacing it" + EndOfLine)
+		    KillAdoptedServer(kRerankPort)
+		    For i As Integer = 1 To 10
+		      If ProbeExistingServerOn(RerankBaseURL(), modelFi.NativePath) = "none" Then Exit
+		      Thread.SleepCurrent(200)
+		    Next
+		  ElseIf probe <> "none" Then
+		    App.AppendDebugLog("ModelManager: reranker port conflict: " + probe + EndOfLine)
+		    Return
+		  End If
+
+		  Var serverBin As FolderItem = ServerBinary()
+		  If serverBin = Nil Or Not serverBin.Exists Then Return
+
+		  Var args() As String
+		  args.Add("--model")
+		  args.Add(modelFi.NativePath)
+		  // All three flags are required together — llama-server reports "This
+		  // server does not support reranking" if any one is missing.
+		  args.Add("--reranking")
+		  args.Add("--embedding")
+		  args.Add("--pooling")
+		  args.Add("rank")
+		  args.Add("--port")
+		  args.Add(kRerankPort)
+		  args.Add("--host")
+		  args.Add("127.0.0.1")
+		  // llama-server's default --batch-size/--ubatch-size (512) caps the
+		  // tokens processed per SINGLE query+candidate pair (the reranking
+		  // endpoint scores candidates one at a time, not as one combined
+		  // batch — confirmed live: a batch of 8 large candidates succeeded at
+		  // 4096 with 6088 total prompt_tokens reported, so the ceiling is
+		  // per-pair, not per-request). Reranker.kMaxRerankChars caps each
+		  // candidate at 6000 chars (~1500 tokens); 4096 leaves comfortable
+		  // headroom for the query + chat-template overhead on top of that.
+		  // Matching the model's full 40960-token native context here was
+		  // tried first and crashed the server silently on launch (large
+		  // KV-cache allocation with -ngl 99 forcing full GPU offload) — do
+		  // NOT raise this without confirming the server actually stays up.
+		  args.Add("--ctx-size")
+		  args.Add("4096")
+		  args.Add("--batch-size")
+		  args.Add("4096")
+		  args.Add("--ubatch-size")
+		  args.Add("4096")
+		  args.Add("--parallel")
+		  args.Add("1")
+		  args.Add("-ngl")
+		  args.Add("99")
+
+		  mRerankTask = New NSTaskMBS
+		  mRerankTask.launchPath = serverBin.NativePath
+		  mRerankTask.setArguments(args)
+
+		  Var stdoutPipe As New NSPipeMBS
+		  mRerankTask.setStandardOutput(stdoutPipe)
+		  mRerankTask.setStandardError(stdoutPipe)
+		  mRerankTask.launch()
+
+		  mRerankStdoutHandle = stdoutPipe.fileHandleForReading
+		  mRerankStdoutObserver = New NSNotificationObserverMBS
+		  AddHandler mRerankStdoutObserver.GotNotification, AddressOf OnRerankServerOutput
+		  NSNotificationCenterMBS.defaultCenter.addObserver(mRerankStdoutObserver, NSFileHandleMBS.NSFileHandleDataAvailableNotification, mRerankStdoutHandle)
+		  mRerankStdoutHandle.waitForDataInBackgroundAndNotify
+
+		  StartRerankHealthPolling
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub StartRerankHealthPolling()
+		  mRerankHealthElapsed = 0
+		  If mRerankHealthTimer = Nil Then
+		    mRerankHealthTimer = New Timer
+		    mRerankHealthTimer.Period = 3000
+		    AddHandler mRerankHealthTimer.Action, AddressOf OnRerankHealthTimer
+		  End If
+		  mRerankHealthTimer.RunMode = Timer.RunModes.Multiple
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnRerankHealthTimer(sender As Timer)
+		  If mRerankReady Then
+		    sender.RunMode = Timer.RunModes.Off
+		    Return
+		  End If
+		  mRerankHealthElapsed = mRerankHealthElapsed + (sender.Period / 1000)
+		  If mRerankHealthElapsed > kHealthGraceSeconds Then
+		    sender.RunMode = Timer.RunModes.Off
+		    App.AppendDebugLog("ModelManager: reranker server never became healthy — no-match detection stays off" + EndOfLine)
+		    Return
+		  End If
+		  If mRerankHealthConn <> Nil Then Return
+		  mRerankHealthConn = New URLConnection
+		  AddHandler mRerankHealthConn.ContentReceived, AddressOf OnRerankHealthReceived
+		  AddHandler mRerankHealthConn.Error, AddressOf OnRerankHealthError
+		  mRerankHealthConn.Send("GET", RerankBaseURL() + "/health")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnRerankHealthReceived(sender As URLConnection, url As String, httpStatus As Integer, content As String)
+		  #Pragma Unused sender
+		  #Pragma Unused url
+		  #Pragma Unused content
+		  mRerankHealthConn = Nil
+		  If httpStatus = 200 Then
+		    If mRerankHealthTimer <> Nil Then mRerankHealthTimer.RunMode = Timer.RunModes.Off
+		    OnRerankServerBecameReady
+		  End If
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnRerankHealthError(sender As URLConnection, err As RuntimeException)
+		  #Pragma Unused sender
+		  #Pragma Unused err
+		  mRerankHealthConn = Nil // socket not up yet — keep polling
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnRerankServerBecameReady()
+		  mRerankReady = True
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function RerankServerReady() As Boolean
+		  Return mRerankReady
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnRerankServerOutput(observer As NSNotificationObserverMBS, notification As NSNotificationMBS)
+		  #Pragma Unused observer
+		  #Pragma Unused notification
+		  If mRerankStdoutHandle = Nil Then Return
+		  Var data As MemoryBlock = mRerankStdoutHandle.availableData
+		  If data <> Nil And data.Size > 0 Then
+		    mRerankStdoutHandle.waitForDataInBackgroundAndNotify
+		  Else
+		    // Arm regardless of mRerankReady — a crash after becoming ready needs
+		    // recovery/notification just as much as one that never came up.
+		    mRerankCrashCheckTimer = New Timer
+		    mRerankCrashCheckTimer.Period = 500
+		    AddHandler mRerankCrashCheckTimer.Action, AddressOf OnRerankCrashCheckTimer
+		    mRerankCrashCheckTimer.RunMode = Timer.RunModes.Single
+		  End If
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnRerankCrashCheckTimer(sender As Timer)
+		  #Pragma Unused sender
+		  If mRerankTask <> Nil And Not mRerankTask.isRunning Then
+		    App.AppendDebugLog("ModelManager: reranker server exited — no-match detection degrades off, ranking falls back to cosine+BM25" + EndOfLine)
+		    StopRerankServer
+		  End If
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub StartAdoptedRerankWatchdog()
+		  // Adopted reranker servers have no NSTaskMBS handle either — poll
+		  // /health so a later crash is still detected.
+		  If mAdoptedRerankWatchdogTimer = Nil Then
+		    mAdoptedRerankWatchdogTimer = New Timer
+		    mAdoptedRerankWatchdogTimer.Period = kAdoptedWatchdogMS
+		    AddHandler mAdoptedRerankWatchdogTimer.Action, AddressOf OnAdoptedRerankWatchdogTimer
+		  End If
+		  mAdoptedRerankWatchdogTimer.RunMode = Timer.RunModes.Multiple
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedRerankWatchdogTimer(sender As Timer)
+		  If Not mRerankAdopted Then
+		    sender.RunMode = Timer.RunModes.Off
+		    Return
+		  End If
+		  If mAdoptedRerankWatchdogConn <> Nil Then Return // previous probe still in flight
+		  mAdoptedRerankWatchdogConn = New URLConnection
+		  AddHandler mAdoptedRerankWatchdogConn.ContentReceived, AddressOf OnAdoptedRerankWatchdogReceived
+		  AddHandler mAdoptedRerankWatchdogConn.Error, AddressOf OnAdoptedRerankWatchdogError
+		  mAdoptedRerankWatchdogConn.Send("GET", RerankBaseURL() + "/health")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedRerankWatchdogReceived(sender As URLConnection, url As String, httpStatus As Integer, content As String)
+		  #Pragma Unused url
+		  #Pragma Unused content
+		  If sender <> mAdoptedRerankWatchdogConn Then Return
+		  mAdoptedRerankWatchdogConn = Nil
+		  If httpStatus <> 200 Then HandleAdoptedRerankWatchdogFailure
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub OnAdoptedRerankWatchdogError(sender As URLConnection, err As RuntimeException)
+		  #Pragma Unused err
+		  If sender <> mAdoptedRerankWatchdogConn Then Return
+		  mAdoptedRerankWatchdogConn = Nil
+		  HandleAdoptedRerankWatchdogFailure
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub HandleAdoptedRerankWatchdogFailure()
+		  If Not mRerankAdopted Then Return // already stopped by another path
+		  App.AppendDebugLog("ModelManager: adopted reranker server failed health check — treating as crashed" + EndOfLine)
+		  If mAdoptedRerankWatchdogTimer <> Nil Then mAdoptedRerankWatchdogTimer.RunMode = Timer.RunModes.Off
+		  StopRerankServer
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub StopRerankServer()
+		  If mRerankHealthTimer <> Nil Then mRerankHealthTimer.RunMode = Timer.RunModes.Off
+		  If mAdoptedRerankWatchdogTimer <> Nil Then mAdoptedRerankWatchdogTimer.RunMode = Timer.RunModes.Off
+		  mRerankHealthConn = Nil
+		  If mAdoptedRerankWatchdogConn <> Nil Then mAdoptedRerankWatchdogConn.Disconnect
+		  mAdoptedRerankWatchdogConn = Nil
+		  If mRerankTask <> Nil And mRerankTask.isRunning Then
+		    mRerankTask.terminate()
+		  ElseIf mRerankAdopted Then
+		    KillAdoptedServer(kRerankPort)
+		  End If
+		  mRerankTask = Nil
+		  If mRerankStdoutObserver <> Nil Then
+		    NSNotificationCenterMBS.defaultCenter.removeObserver(mRerankStdoutObserver)
+		    mRerankStdoutObserver = Nil
+		  End If
+		  mRerankStdoutHandle = Nil
+		  mRerankAdopted = False
+		  mRerankReady = False
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Sub StopAllServers()
 		  StopServer
 		  StopEmbedServer
+		  StopRerankServer
 		End Sub
 	#tag EndMethod
 
@@ -1256,6 +1598,7 @@ Protected Module ModelManager
 		  // Covers the first-run path where a chat model was already on disk and
 		  // the user selected it without downloading anything.
 		  EnsureEmbeddingModel
+		  EnsureRerankModel
 		End Sub
 	#tag EndMethod
 
@@ -1273,11 +1616,19 @@ Protected Module ModelManager
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mAdoptedRerankWatchdogTimer As Timer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mAdoptedWatchdogConn As URLConnection
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
 		Private mAdoptedEmbedWatchdogConn As URLConnection
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mAdoptedRerankWatchdogConn As URLConnection
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1293,6 +1644,10 @@ Protected Module ModelManager
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mRerankAdopted As Boolean
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mServerAdopted As Boolean
 	#tag EndProperty
 
@@ -1301,7 +1656,15 @@ Protected Module ModelManager
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mRerankHealthConn As URLConnection
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mEmbedHealthElapsed As Double
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mRerankHealthElapsed As Double
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1309,7 +1672,15 @@ Protected Module ModelManager
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mRerankHealthTimer As Timer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mEmbedReady As Boolean
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mRerankReady As Boolean
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1317,7 +1688,15 @@ Protected Module ModelManager
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mRerankCrashCheckTimer As Timer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mEmbedStdoutHandle As NSFileHandleMBS
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mRerankStdoutHandle As NSFileHandleMBS
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1325,7 +1704,15 @@ Protected Module ModelManager
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mRerankStdoutObserver As NSNotificationObserverMBS
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mEmbedTask As NSTaskMBS
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mRerankTask As NSTaskMBS
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1375,6 +1762,9 @@ Protected Module ModelManager
 	#tag EndConstant
 
 	#tag Constant, Name = kEmbedPort, Type = String, Dynamic = False, Default = \"8089", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kRerankPort, Type = String, Dynamic = False, Default = \"8093", Scope = Public
 	#tag EndConstant
 
 	#tag Constant, Name = kHFBase, Type = String, Dynamic = False, Default = \"https://huggingface.co", Scope = Private
