@@ -317,7 +317,21 @@ Public Class XDOXSession
 		  // or the shared DB handle, so nothing here races the main thread. The
 		  // computed historyDropCount is applied to mHistory later on the main
 		  // thread in BeginStreaming.
-		  matchStatus = Retrieval.MatchStatus(userMessage, conn)
+		  //
+		  // RETRIEVAL uses userMessage plus the immediately preceding user turn
+		  // (RetrievalQuery), not userMessage alone — a follow-up like "Does
+		  // Xojo have a native way of doing this" carries almost no keyword
+		  // content of its own; "this" only resolves against the prior turn.
+		  // The chat REQUEST itself still sends plain userMessage — only the
+		  // search query is augmented, so this can't put words in the user's
+		  // mouth or affect what the model is asked. Only the previous user
+		  // turn is folded in, not the assistant's reply: assistant text can
+		  // contain invented terms (see the reranker/SymbolCheck work), which
+		  // would poison the retrieval query with vocabulary the docs never
+		  // used. Kept short (last turn only) to limit how much a topic-switch
+		  // follow-up gets dragged back toward the old topic.
+		  Var retrievalQuery As String = RetrievalQuery(userMessage, history)
+		  matchStatus = Retrieval.MatchStatus(retrievalQuery, conn)
 		  If matchStatus = Retrieval.kStatusNoMatch Then
 		    // Hard gate: no context to build, no chat-model request to prepare.
 		    // BeginStreaming short-circuits before opening a connection — see its
@@ -326,8 +340,8 @@ Public Class XDOXSession
 		    Return
 		  End If
 
-		  context = Retrieval.BuildContext(userMessage, conn)
-		  requestMessage = Retrieval.BuildNotesPreamble(userMessage, conn) + userMessage
+		  context = Retrieval.BuildContext(retrievalQuery, conn)
+		  requestMessage = Retrieval.BuildNotesPreamble(retrievalQuery, conn) + userMessage
 		  sysPrompt = BaseInstructions()
 		  If context <> "" Then
 		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + "Context:" + EndOfLine + context
@@ -347,6 +361,20 @@ Public Class XDOXSession
 		    estimate = TokenCount(TranscriptText(sysPrompt, requestMessage, history, historyDropCount))
 		  Wend
 		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function RetrievalQuery(userMessage As String, history() As String) As String
+		  // history is the flat oldest-first [user, assistant, user, assistant, ...]
+		  // snapshot SendMessage builds from mHistory (role labels are dropped —
+		  // see its comment). The previous USER turn is always two slots back
+		  // from the end (the last slot is the previous assistant reply), so it
+		  // only exists once at least one full exchange has happened.
+		  If history.Count < 2 Then Return userMessage
+		  Var prevUserTurn As String = history(history.Count - 2)
+		  If prevUserTurn = "" Then Return userMessage
+		  Return prevUserTurn + " " + userMessage
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
