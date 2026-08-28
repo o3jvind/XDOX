@@ -503,6 +503,120 @@ Protected Module Retrieval
 		    includedIDs.Value(chunkIDs(overviewIdx)) = True
 		  End If
 
+		  // Task 4 "native-alternative-never-named" gap: overviewIdx above
+		  // only fires when the query names a class ExtractClassName
+		  // recognizes. Most of the time a user never names the class they
+		  // don't know exists yet ("does Xojo have a native way to show a
+		  // webpage" never says DesktopHTMLViewer) — measured live against
+		  // the real DB: the correct Overview chunk then ranks ~#400 of
+		  // ~15,000 chunks on cosine+BM25 alone, far outside any affordable
+		  // candidateCount. But scoped to JUST this pool's own Overview
+		  // chunks (~550 rows, not ~15,000 — a cheap second scan, same cost
+		  // class as the main scan above but over a tiny slice), the same
+		  // chunk ranks #7. Cosine alone still isn't reliable enough to
+		  // gate on directly here (measured: an unrelated Overview chunk
+		  // can outscore the correct one for a different query — e.g.
+		  // "sort an array" scores AutoDiscovery > Overview higher than
+		  // this query scores its own correct target), so these are added
+		  // as ADDITIONAL rerank candidates, not a guarantee — they ride
+		  // the same kMinRelevanceScore floor as everything else
+		  // afterward, exactly like the platform-mismatch/MBS-noise cases
+		  // already handled there.
+		  //
+		  // Runs UNCONDITIONALLY, not just when overviewIdx < 0 — found
+		  // live during this fix's own testing: the exact repro above
+		  // ALSO word-boundary-matches "WebPage" (from "webpage" in the
+		  // query, the same false-positive mechanism Task 5's
+		  // QueryNamesClass fix already documents), so overviewIdx was
+		  // >= 0 (WebPage > Overview, the WRONG class) even though
+		  // DesktopHTMLViewer — the class that actually answers the
+		  // question — was never named at all. Gating on overviewIdx < 0
+		  // would silently skip the fallback in exactly the cases it
+		  // exists to fix. The dedup below (includedIDs) already prevents
+		  // double-adding the same chunk if it happens to be both the
+		  // guaranteed match AND the top fallback candidate, so running
+		  // this unconditionally is safe and no more expensive per query
+		  // (still one small ~550-row scan either way).
+		  Var ovChunkIDs() As Integer
+		  Var ovTitles() As String
+		  Var ovTexts() As String
+		  Var ovSources() As String
+		  Var ovChunkIndexes() As Integer
+		  Var ovPrevIDs() As Integer
+		  Var ovNextIDs() As Integer
+		  Var ovCosScores() As Double
+		  Try
+		    Var ovSQL As String
+		    If mbsOnly Then
+		      ovSQL = "SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ? AND c.title LIKE '% > Overview'"
+		    Else
+		      ovSQL = "SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE (c.docs_version = ? OR c.docs_version = '') AND c.docs_version <> ? AND c.title LIKE '% > Overview'"
+		    End If
+		    Var ovRS As RowSet
+		    If mbsOnly Then
+		      ovRS = db.SelectSQL(ovSQL, DBHelper.kMBSDocsVersion)
+		    Else
+		      ovRS = db.SelectSQL(ovSQL, activeVersion, DBHelper.kMBSDocsVersion)
+		    End If
+		    While Not ovRS.AfterLastRow
+		      Var embBlob As MemoryBlock = ovRS.Column("embedding").BlobValue
+		      If embBlob <> Nil And embBlob.Size > 0 And Not includedIDs.HasKey(ovRS.Column("id").IntegerValue) Then
+		        ovChunkIDs.Add(ovRS.Column("id").IntegerValue)
+		        ovTitles.Add(ovRS.Column("title").StringValue)
+		        ovTexts.Add(ovRS.Column("chunk_text").StringValue)
+		        ovSources.Add(ovRS.Column("source").StringValue)
+		        ovChunkIndexes.Add(ovRS.Column("chunk_index").IntegerValue)
+		        ovPrevIDs.Add(ovRS.Column("prev_id").IntegerValue)
+		        ovNextIDs.Add(ovRS.Column("next_id").IntegerValue)
+		        ovCosScores.Add(Embedder.CosineSimilarity(queryEmb, embBlob))
+		      End If
+		      ovRS.MoveToNextRow
+		    Wend
+		    ovRS.Close
+		  Catch e As DatabaseException
+		    App.AppendDebugLog("Retrieval.ScopedSearch (Overview fallback): " + e.Message + EndOfLine)
+		  End Try
+
+		  // Top kOverviewFallbackCount by cosine alone (no BM25/boost —
+		  // these terse summary chunks rarely share vocabulary with a
+		  // conversational query, which is the whole reason they lose
+		  // the main race; BM25 would just add noise here, not signal).
+		  Var ovUsed() As Boolean
+		  For i As Integer = 0 To ovCosScores.LastIndex
+		    ovUsed.Add(False)
+		  Next
+		  Var ovPicked As Integer = 0
+		  While ovPicked < kOverviewFallbackCount And ovPicked < ovCosScores.Count
+		    Var bestIdx As Integer = -1
+		    Var bestScore As Double = -2.0
+		    For i As Integer = 0 To ovCosScores.LastIndex
+		      If Not ovUsed(i) And ovCosScores(i) > bestScore Then
+		        bestScore = ovCosScores(i)
+		        bestIdx = i
+		      End If
+		    Next
+		    If bestIdx < 0 Then Exit
+		    ovUsed(bestIdx) = True
+		    ovPicked = ovPicked + 1
+
+		    // Append as a plain additional candidate — not through
+		    // finalIdxs' maxResults cap, since this pool's cap was
+		    // already spent above. HybridSearchChunks reranks and
+		    // kMinRelevanceScore-filters the whole merged set afterward,
+		    // so a genuinely irrelevant fallback candidate gets dropped
+		    // there rather than crowding out a real result here.
+		    chunkIDs.Add(ovChunkIDs(bestIdx))
+		    titles.Add(ovTitles(bestIdx))
+		    texts.Add(ovTexts(bestIdx))
+		    sources.Add(ovSources(bestIdx))
+		    chunkIndexes.Add(ovChunkIndexes(bestIdx))
+		    prevIDs.Add(ovPrevIDs(bestIdx))
+		    nextIDs.Add(ovNextIDs(bestIdx))
+		    cosScores.Add(ovCosScores(bestIdx))
+		    combined.Add(ovCosScores(bestIdx))
+		    finalIdxs.Add(chunkIDs.LastIndex)
+		  Wend
+
 		  // Track by chunk ID (not local array index) — MergeScopedResult
 		  // remaps indexes when combining native+MBS into one array, so an
 		  // index captured here wouldn't survive the merge. BuildContext
@@ -1626,6 +1740,17 @@ Protected Module Retrieval
 	#tag EndConstant
 
 	#tag Constant, Name = kClassNameBoost, Type = Double, Dynamic = False, Default = \"0.15", Scope = Private
+	#tag EndConstant
+
+	// How many of a pool's own Overview-only chunks (ScopedSearch's
+	// class-not-named fallback, see the comment there) get added as extra
+	// rerank candidates. Measured live: the correct chunk ranked #7 of 556
+	// native Overview chunks for the Task 4 repro — an earlier value of 3
+	// was measured live to be too small (it excluded rank #7 entirely, so
+	// the fallback added two OTHER Overview chunks and never gave the
+	// reranker a chance to see the right one). 10 gives real margin above
+	// #7 without materially growing the reranker's per-turn batch size.
+	#tag Constant, Name = kOverviewFallbackCount, Type = Double, Dynamic = False, Default = \"10", Scope = Private
 	#tag EndConstant
 
 	#tag Constant, Name = kDefaultChunkLimit, Type = Double, Dynamic = False, Default = \"4", Scope = Private
