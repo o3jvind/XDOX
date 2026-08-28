@@ -1,7 +1,7 @@
 #tag Module
 Protected Module Reranker
 	#tag Method, Flags = &h0
-		Function RerankBatch(query As String, candidates() As String, timeoutSeconds As Integer = 10) As Double()
+		Function RerankBatch(query As String, candidates() As String, timeoutSeconds As Integer = 25) As Double()
 		  // POST /v1/rerank on the local reranker server. Returns one relevance
 		  // score per candidate (0.0 per slot on failure) or an empty array when
 		  // the whole request failed / the server isn't up — callers MUST treat an
@@ -9,12 +9,41 @@ Protected Module Reranker
 		  // order" rather than a hard failure, same graceful-degradation contract
 		  // as Embedder.FetchEmbedding returning Nil. SendSync blocks the CALLING
 		  // thread only — Retrieval only calls this from ChatPrepThread's worker.
+		  //
+		  // Default raised from 10s (Task 7, 2026-08-28): the 10s default was
+		  // set for the 0.6B model. After upgrading to Qwen3-Reranker-4B (~7x
+		  // the parameters), a live batch of 7 candidates timed out at 10s —
+		  // confirmed via "Reranker.RerankBatch: Anmodningen udløb." in the
+		  // debug log — silently falling back to unranked cosine+BM25 order
+		  // for that turn, which let an MBS-only chunk (no TargetPlatformLabel
+		  // signal ever gets applied without a successful rerank pass) get
+		  // presented as if it were native. 25s is a first-cut increase, not
+		  // independently measured against the 4B model's real latency
+		  // distribution — revisit if timeouts keep happening even at this
+		  // value, or lower it if 4B turns out to reliably finish well under
+		  // it in practice.
 		  Var result() As Double
 		  If candidates.Count = 0 Then Return result
 
 		  Var body As New JSONItem
 		  body.Value("model") = kRerankModelFile
-		  body.Value("query") = query
+		  // Qwen3-Reranker is trained on an "Instruct: {task}\nQuery: {query}"
+		  // input, not a bare query string — the model card documents this
+		  // (default instruction: "Given a web search query, retrieve
+		  // relevant passages that answer the query") and community reports
+		  // measure 1-5% accuracy gains from using a task-specific
+		  // instruction over the default. Confirmed live during Task 7
+		  // testing: without this prefix, the 0.6B model scored a completely
+		  // unrelated IDE-tutorial chunk (generic "Navigator/Editor/Library"
+		  // prose that happens to repeat "web page") at 0.99 relevance
+		  // against "Does Xojo have a native way to show a webpage in a
+		  // desktop app?" — well above kNoMatchThreshold, so MatchStatus's
+		  // no-match gate never caught it and the model hallucinated a
+		  // nonexistent "WebBrowser" class instead. With this instruction
+		  // prefix (still on the 0.6B model), the true-positive/false-positive
+		  // gap widened enough to be usable; combined with the kRerankModelFile
+		  // upgrade below (4B), the gap became reliably decisive.
+		  body.Value("query") = "Instruct: " + kRerankInstruction() + EndOfLine + "Query: " + query
 		  Var docs As New JSONItem
 		  For Each c As String In candidates
 		    // Same truncation reasoning as Embedder.kMaxEmbedChars: a truncated
@@ -77,24 +106,40 @@ Protected Module Reranker
 	#tag EndMethod
 
 
-	#tag Constant, Name = kRerankModelFile, Type = String, Dynamic = False, Default = \"qwen3-reranker-0.6b.gguf", Scope = Public
+	#tag Constant, Name = kRerankModelFile, Type = String, Dynamic = False, Default = \"qwen3-reranker-4b-q8_0.gguf", Scope = Public
 	#tag EndConstant
+
+	#tag Method, Flags = &h0
+		Function kRerankInstruction() As String
+		  // A plain method, not a #tag Constant — see AllThirdPartyNote in
+		  // Retrieval.xojo_code for why a literal comma in a Constant's
+		  // default value silently truncates it at the project-file level.
+		  // This string has no comma today, but keeping the same
+		  // method-not-constant convention for any prompt text avoids ever
+		  // having to remember the rule mid-edit.
+		  Return "Given a question about Xojo (desktop/web/iOS/console/Android app development), retrieve documentation passages that directly and specifically answer it."
+		End Function
+	#tag EndMethod
 
 	#tag Constant, Name = kMaxRerankChars, Type = Double, Dynamic = False, Default = \"6000", Scope = Public
 	#tag EndConstant
 
-	// 0.9 is the value validated in the original 16-query test set (0/8 false
-	// positives, 1/8 false negative). A SYNTHETIC (not live) test with
-	// hand-typed candidate text found a believable near-miss risk: a query
-	// containing "type detection" scored 0.857 against a chunk about Xojo's
-	// static type system (surface "type" vocabulary overlap, wrong sense) —
-	// that number was never reproduced against the real production
-	// chunk_text, and a threshold of 0.85 would NOT have caught it anyway
-	// (0.857 > 0.85). Left at the original validated 0.9 rather than acting
-	// on that unreproduced synthetic number. Live production runs of the
-	// real CSV repro scored 0.005–0.097, comfortably under 0.9. Re-check
-	// against a broader query set if false-positive "no match" reports show
-	// up on genuinely answerable questions.
+	// 0.9 was validated in the original 16-query test set (0/8 false
+	// positives, 1/8 false negative) — but that validation ran against the
+	// 0.6B model WITHOUT the Instruct/Query prompt format (see
+	// kRerankInstruction/RerankBatch). Both changed together (Task 7,
+	// 2026-08-28) after a live false positive: the 0.6B model, called with
+	// a bare query string, scored an unrelated IDE-tutorial chunk at 0.99
+	// relevance against a genuinely answerable question, so MatchStatus's
+	// no-match gate never caught it. Switching to the 4B model AND adding
+	// the instruction prefix widened the true/false-positive gap enough to
+	// fix that specific repro (0.92 true positive vs 0.52 false positive,
+	// measured directly against the rerank server, bypassing XDOX). This
+	// value has NOT been re-validated against a broad query set under the
+	// new model+prompt combination — only against the two known false
+	// positives found in Task 7 testing. Re-check against a broader query
+	// set (ideally the original 16, plus these two) before trusting this
+	// threshold the way the old value was trusted.
 	#tag Constant, Name = kNoMatchThreshold, Type = Double, Dynamic = False, Default = \"0.9", Scope = Public
 	#tag EndConstant
 

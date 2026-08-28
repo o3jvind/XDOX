@@ -355,8 +355,8 @@ function updateEmbedNote() {
   if (!note) return;
   if (!embedModelDone || !rerankModelDone) {
     note.textContent = 'First-time setup: along with your chat model, XDOX '
-      + 'downloads two small fixed models that power search — a search model '
-      + '(nomic-embed-text, 146 MB) and a reranker (Qwen3-Reranker, 640 MB). '
+      + 'downloads two fixed models that power search — a search model '
+      + '(nomic-embed-text, 146 MB) and a reranker (Qwen3-Reranker-4B, 4.3 GB). '
       + 'This happens only once — later launches download nothing.';
     note.style.display = '';
   } else {

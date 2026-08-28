@@ -134,12 +134,24 @@ Protected Module ModelManager
 
 	#tag Method, Flags = &h0
 		Sub EnsureRerankModel()
-		  // The reranker model is a fixed dependency (Qwen3-Reranker-0.6B), not a
+		  // The reranker model is a fixed dependency (Qwen3-Reranker-4B), not a
 		  // catalog choice — same "disclosed in the picker = informed consent"
 		  // pattern as EnsureEmbeddingModel. Use Voodisss's conversion, NOT
 		  // ggml-org's — the latter is a known-broken GGUF missing the
 		  // cls.output.weight classifier tensor and returns near-zero, low-signal
 		  // scores regardless of actual relevance.
+		  //
+		  // Upgraded from the 0.6B variant (Task 7, 2026-08-28): live testing
+		  // found the 0.6B model, even with Reranker.kRerankInstruction's
+		  // Instruct/Query prompt format, unreliably separated a real answer
+		  // from an unrelated IDE-tutorial chunk with superficial keyword
+		  // overlap (both scored >0.9). The 4B model with the same prompt
+		  // format showed a much clearer separation (0.92 true positive vs
+		  // 0.52 false positive on the same repro) — see Reranker.xojo_code's
+		  // kNoMatchThreshold comment for the measurement and its caveats.
+		  // 4B is ~4.3GB (Q8_0) vs 0.6B's ~640MB — a real download-size and
+		  // disk-space cost, but the reranker is a small, optional
+		  // improvement layer (see MatchStatus), not required for basic chat.
 		  Var f As FolderItem = ModelsFolder().Child(Reranker.kRerankModelFile)
 		  If f <> Nil And f.Exists And f.Length > 0 Then Return
 
@@ -147,7 +159,7 @@ Protected Module ModelManager
 		  If IsModelBusy("reranker") Then Return // already downloading or verifying
 
 		  App.AppendDebugLog("ModelManager: downloading reranker model from HF" + EndOfLine)
-		  Var url As String = kHFBase + "/Voodisss/Qwen3-Reranker-0.6B-GGUF-llama_cpp/resolve/main/Qwen3-Reranker-0.6B.Q8_0.gguf"
+		  Var url As String = kHFBase + "/Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp/resolve/main/Qwen3-Reranker-4B.Q8_0.gguf"
 		  Var dest As FolderItem = ModelsFolder().Child(Reranker.kRerankModelFile + ".part")
 
 		  Var conn As New URLConnection
@@ -158,8 +170,8 @@ Protected Module ModelManager
 		  Var info As New Dictionary
 		  info.Value("modelId") = "reranker"
 		  info.Value("filename") = Reranker.kRerankModelFile
-		  info.Value("bytes") = CType(639153344, Int64)
-		  info.Value("sha256") = "6ddab39a36c6c87fdb76f0e5f05657012d5dbc97034c0983c157f17ef9f34d55"
+		  info.Value("bytes") = CType(4279678912, Int64)
+		  info.Value("sha256") = "102ac400d68f02877c2fdfecf0732872652298448352b6faf28ec7f8dca8c913"
 		  info.Value("lastProgressTick") = System.Ticks
 		  mDownloads.Value(conn) = info
 

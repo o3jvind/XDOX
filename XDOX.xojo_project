@@ -21,6 +21,7 @@ DesktopWindow=IndexProgressWindow;IndexProgressWindow.xojo_window;&h000000001A00
 DesktopWindow=DocsNotInstalledWindow;DocsNotInstalledWindow.xojo_window;&h000000001A00E001;&h0000000000000000;false
 Class=IndexerProgressAdapter;IndexerProgressAdapter.xojo_code;&h000000001A00F001;&h0000000000000000;false
 Class=RetrievalResult;RetrievalResult.xojo_code;&h000000001A010001;&h0000000000000000;false
+Class=ScopedSearchResult;ScopedSearchResult.xojo_code;&h000000001A024001;&h0000000000000000;false
 Module=Retrieval;Retrieval.xojo_code;&h000000001A011001;&h0000000000000000;false
 Class=XDOXSession;XDOXSession.xojo_code;&h000000001A012001;&h0000000000000000;false
 Interface=XDOXSessionDelegate;XDOXSessionDelegate.xojo_code;&h000000001A013001;&h0000000000000000;false

@@ -393,6 +393,15 @@ Public Class XDOXSession
 		    context = context.ReplaceAll(Retrieval.kAllThirdPartyMarker + EndOfLine + EndOfLine, "")
 		  End If
 
+		  // Same marker-strip-and-move pattern as allThirdParty above, for
+		  // Task 7's "native and MBS both answer this" case — see
+		  // Retrieval.BuildContext/BothSourcesNote. Mutually exclusive with
+		  // allThirdParty by construction (BuildContext only sets one marker).
+		  Var bothSources As Boolean = context.IndexOf(Retrieval.kBothSourcesMarker) >= 0
+		  If bothSources Then
+		    context = context.ReplaceAll(Retrieval.kBothSourcesMarker + EndOfLine + EndOfLine, "")
+		  End If
+
 		  sysPrompt = BaseInstructions()
 		  If context <> "" Then
 		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + "Context:" + EndOfLine + context
@@ -400,6 +409,8 @@ Public Class XDOXSession
 		  sysPrompt = sysPrompt + EndOfLine + EndOfLine + ClosingReminders()
 		  If allThirdParty Then
 		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + Retrieval.AllThirdPartyNote()
+		  ElseIf bothSources Then
+		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + Retrieval.BothSourcesNote()
 		  End If
 
 		  // Token guard: drop RAG context first, then trim oldest history pairs.
