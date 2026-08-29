@@ -395,17 +395,3 @@
   white-space: nowrap;
 }
 
-/* Unverified-code warning — appended to an assistant bubble whose code
-   block(s) contain a symbol never seen in the retrieved documentation.
-   See SymbolCheck.FindUnverifiedSymbolsInCode / chat-handler.js's
-   flagUnverifiedCode. Amber, not red — a caution, not an error state;
-   the reply itself is left untouched, this only adds an honest caveat. */
-.code-unverified-warning {
-  margin-top: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border-left: 3px solid var(--color-warning);
-  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
-  border-radius: 6px;
-  font-size: var(--font-size-xs);
-  color: var(--text-primary);
-}

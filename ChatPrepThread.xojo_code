@@ -3,19 +3,20 @@ Public Class ChatPrepThread
 Inherits Thread
 	#tag Event
 		Sub Run()
-		  // Off-main-thread request preparation. Everything here makes synchronous
-		  // HTTP calls to the local server: BuildContext embeds the query
-		  // (Embedder.FetchEmbedding → SendSync) and the token guard calls
-		  // /tokenize. Running them on a worker thread keeps the UI responsive
-		  // while a slow local model warms up. The finished prompt is handed back
-		  // to the session on the MAIN thread (UserInterfaceUpdate), which opens
-		  // the streaming connection.
+		  // Off-main-thread request preparation. Retrieval (embedding via
+		  // Embedder.FetchEmbedding → SendSync, plus the reranker call) makes
+		  // synchronous HTTP calls to local servers, so this runs on a worker
+		  // thread to keep the UI responsive. The finished answer text is
+		  // handed back to the session on the MAIN thread (UserInterfaceUpdate)
+		  // for rendering — there's no streaming connection to open anymore
+		  // (see XDOXSession.PrepareRequest's comment: no chat-model
+		  // generation happens in this flow at all as of 2026-08-29).
 		  //
 		  // Uses its OWN DB connection so retrieval reads never share the
 		  // main-thread handle (WAL allows the concurrent reader).
 		  Var conn As SQLiteDatabase = DBHelper.OpenConnection
 		  Try
-		    Session.PrepareRequest(mUserMessage, mHistory, conn, mSysPrompt, mRequestMessage, mHistoryDropCount, mMatchStatus, mContext)
+		    Session.PrepareRequest(mUserMessage, mHistory, conn, mMatchStatus, mAnswerText)
 		  Catch e As RuntimeException
 		    App.AppendDebugLog("ChatPrepThread: " + e.Message + EndOfLine)
 		    mFailed = True
@@ -28,11 +29,11 @@ Inherits Thread
 	#tag Event
 		Sub UserInterfaceUpdate(data() As Dictionary)
 		  #Pragma Unused data
-		  // Back on the main thread — apply the prepared request and start the
-		  // (already-async) streaming connection. BeginStreaming drops the call
-		  // if mGeneration has moved on (user stopped / resent).
+		  // Back on the main thread — render the prepared answer.
+		  // BeginStreaming (name kept for now) drops the call if mGeneration
+		  // has moved on (user stopped / resent).
 		  If Session <> Nil Then
-		    Session.BeginStreaming(mGeneration, mUserMessage, mSysPrompt, mRequestMessage, mHistoryDropCount, mFailed, mMatchStatus, mContext)
+		    Session.BeginStreaming(mGeneration, mUserMessage, mMatchStatus, mAnswerText, mFailed)
 		  End If
 		End Sub
 	#tag EndEvent
@@ -65,23 +66,11 @@ Inherits Thread
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mSysPrompt As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mRequestMessage As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mHistoryDropCount As Integer
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
 		Private mMatchStatus As String
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mContext As String
+		Private mAnswerText As String
 	#tag EndProperty
 
 	#tag Property, Flags = &h21

@@ -12,34 +12,33 @@ function showUserMessage(text) {
   scrollToBottom();
 }
 
-function appendToken(text) {
-  currentRawText += text;
-  if (!currentAssistantBubble) {
-    removeThinkingIndicator();
-    currentAssistantBubble = document.createElement('div');
-    currentAssistantBubble.className = 'message assistant';
-    chatArea().appendChild(currentAssistantBubble);
-  }
-  currentAssistantBubble.innerHTML = sanitizeHTML(marked.parse(currentRawText));
+function renderReply(text) {
+  currentRawText = text;
+  removeThinkingIndicator();
+  currentAssistantBubble = document.createElement('div');
+  currentAssistantBubble.className = 'message assistant';
+  currentAssistantBubble.innerHTML = sanitizeHTML(marked.parse(text));
+  chatArea().appendChild(currentAssistantBubble);
   scrollToBottom();
 }
 
 function showCannedResponse(text) {
-  // Deterministic non-streamed replies (e.g. the retrieval no-match gate)
-  // must render as one atomic operation — calling appendToken(text) then
-  // finalizeMessage() back-to-back with no real time between them (unlike
-  // normal streaming, which is naturally paced by network-arriving SSE
-  // chunks) risks the two separate EvaluateJavaScript calls racing in the
-  // WebView's JS queue, observed live as the rendered bubble being cut off
-  // mid-word. A single call has no such race.
-  appendToken(text);
+  // XDOXSession no longer calls the chat-completion model at all
+  // (2026-08-29 redesign) — every reply is fully computed on the Xojo
+  // side (either matched documentation text or the no-match message)
+  // before it ever reaches here, so render+finalize always happen as one
+  // atomic call. Kept as a single call (not renderReply() then
+  // finalizeMessage() as two separate EvaluateJavaScript round-trips)
+  // because two separate calls with no real time between them were
+  // observed live to race in the WebView's JS queue, cutting the
+  // rendered bubble off mid-word.
+  renderReply(text);
   finalizeMessage();
 }
 
 function finalizeMessage() {
-  // Always clear the thinking spinner — on an early stop during request prep,
-  // no assistant bubble was ever created (appendToken never ran), so this is
-  // the only place the orphaned indicator gets removed.
+  // Always clear the thinking spinner — guards an edge case where no
+  // bubble was ever created (e.g. an early stop during request prep).
   removeThinkingIndicator();
   if (!currentAssistantBubble) return;
 
@@ -86,27 +85,6 @@ function finalizeMessage() {
   // Save as Note button — gets the raw markdown so the note keeps formatting.
   addSaveNoteButton(bubble, lastUserMessage, rawText);
 
-  scrollToBottom();
-}
-
-function flagUnverifiedCode(symbols) {
-  // Called from Xojo's OnCodeUnverified, AFTER finalizeMessage already ran
-  // (currentAssistantBubble is null by then) — so this finds the most
-  // recently rendered assistant bubble directly rather than relying on a
-  // module-level reference to it. Attaches a warning banner rather than
-  // touching the bubble's own rendered markdown, so nothing about the
-  // model's actual reply is edited or hidden.
-  if (!symbols || symbols.length === 0) return;
-  const bubbles = chatArea().querySelectorAll('.message.assistant');
-  if (bubbles.length === 0) return;
-  const bubble = bubbles[bubbles.length - 1];
-  if (bubble.querySelector('.code-unverified-warning')) return; // don't double-flag
-
-  const warning = document.createElement('div');
-  warning.className = 'code-unverified-warning';
-  warning.textContent = 'This code could not be fully verified against the documentation — check before using: '
-    + symbols.join(', ');
-  bubble.appendChild(warning);
   scrollToBottom();
 }
 

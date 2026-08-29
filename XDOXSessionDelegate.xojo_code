@@ -2,15 +2,7 @@
 Public Interface XDOXSessionDelegate
 
 	#tag Method, Flags = &h0
-		Sub OnToken(text As String)
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
 		Sub OnDone()
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Sub OnCodeUnverified(symbols() As String)
 	#tag EndMethod
 
 	#tag Method, Flags = &h0

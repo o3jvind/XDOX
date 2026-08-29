@@ -1,6 +1,6 @@
 // XDOX — main UI controller.
 // Xojo calls these global functions via EvaluateJavaScript:
-//   appendToken(text)       — defined in chat-handler.js
+//   showCannedResponse(text) — defined in chat-handler.js; renders the full reply
 //   finalizeMessage()       — defined in chat-handler.js; also resets UI state below
 //   showError(message)      — defined in chat-handler.js; also resets UI state below
 //   updateIndexStatus(msg)

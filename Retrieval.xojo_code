@@ -1142,6 +1142,122 @@ Protected Module Retrieval
 		  // reads never share the main-thread handle. Caller is expected to have
 		  // already checked MatchStatus <> kStatusNoMatch — this function no
 		  // longer gates on the reranker score itself (see MatchStatus).
+		  Var nativeResults() As RetrievalResult
+		  Var mbsResults() As RetrievalResult
+		  Var allThirdParty As Boolean
+		  Var bothFound As Boolean
+		  GroupResults(query, conn, nativeResults, mbsResults, allThirdParty, bothFound)
+		  If nativeResults.Count = 0 And mbsResults.Count = 0 Then Return ""
+
+		  // Short markers, not the full note text, are embedded here — the
+		  // model largely ignores instructions placed BEFORE a large Context
+		  // block (see XDOXSession.ClosingReminders' "burger test" comment),
+		  // confirmed live: putting the full AllThirdPartyNote() text at the
+		  // top of the docs context did NOT stop the model from opening a
+		  // reply with "No, not with a native Xojo control." XDOXSession.
+		  // PrepareRequest strips these markers back out of context and
+		  // appends the actual note text to sysPrompt AFTER ClosingReminders
+		  // instead, where instructions actually stick.
+		  Var sb As String = ""
+		  If allThirdParty Then
+		    sb = sb + kAllThirdPartyMarker + EndOfLine + EndOfLine
+		  ElseIf bothFound Then
+		    sb = sb + kBothSourcesMarker + EndOfLine + EndOfLine
+		  End If
+
+		  If nativeResults.Count > 0 Then
+		    sb = sb + "[Native Xojo Docs]" + EndOfLine
+		    For di As Integer = 0 To nativeResults.Count - 1
+		      If di > 0 Then sb = sb + EndOfLine + "---" + EndOfLine + EndOfLine
+		      sb = sb + nativeResults(di).Text
+		    Next
+		  End If
+		  If mbsResults.Count > 0 Then
+		    If nativeResults.Count > 0 Then sb = sb + EndOfLine + EndOfLine
+		    sb = sb + "[Third-Party (MBS Plugin) Docs]" + EndOfLine
+		    For di As Integer = 0 To mbsResults.Count - 1
+		      If di > 0 Then sb = sb + EndOfLine + "---" + EndOfLine + EndOfLine
+		      sb = sb + mbsResults(di).Text
+		    Next
+		  End If
+
+		  Return sb
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function BuildUserFacingAnswer(query As String, conn As SQLiteDatabase = Nil) As String
+		  // The radical fix for Task 2's fabrication problem (see the
+		  // retrieval-quality-backlog memory, 2026-08-29): a 12-query test
+		  // battery found retrieval identifies the right class ~92% of the
+		  // time but only ~25% of chat-model-GENERATED replies had fully
+		  // correct code — and a hard prompt rule telling the model to
+		  // never write its own code, even backed by mechanical post-hoc
+		  // stripping of anything it wrote anyway, was confirmed live NOT
+		  // to give the user a trustworthy answer: the model still
+		  // fabricated in PROSE too (invented method names in running
+		  // text, not just code blocks), which stripping code alone never
+		  // addressed. The user's call (2026-08-29): the chat model must
+		  // not compose ANY part of the answer — not code, not prose. Its
+		  // only remaining job, upstream of this function, is turning the
+		  // conversation into a good retrieval query (RetrievalQuery/
+		  // MatchStatus) — this function then renders the ACTUAL matched
+		  // documentation text directly, verbatim, as the answer.
+		  Var nativeResults() As RetrievalResult
+		  Var mbsResults() As RetrievalResult
+		  Var allThirdParty As Boolean
+		  Var bothFound As Boolean
+		  GroupResults(query, conn, nativeResults, mbsResults, allThirdParty, bothFound)
+		  If nativeResults.Count = 0 And mbsResults.Count = 0 Then Return ""
+
+		  Var sb As String = ""
+		  If nativeResults.Count > 0 Then
+		    For di As Integer = 0 To nativeResults.Count - 1
+		      If di > 0 Then sb = sb + EndOfLine + EndOfLine
+		      sb = sb + FormatResultForDisplay(nativeResults(di))
+		    Next
+		  End If
+		  If mbsResults.Count > 0 Then
+		    If nativeResults.Count > 0 Then
+		      sb = sb + EndOfLine + EndOfLine + "### From the MBS plugin docs" + EndOfLine + EndOfLine
+		    End If
+		    For di As Integer = 0 To mbsResults.Count - 1
+		      If di > 0 Then sb = sb + EndOfLine + EndOfLine
+		      sb = sb + FormatResultForDisplay(mbsResults(di))
+		    Next
+		  End If
+
+		  If bothFound Then
+		    sb = sb + EndOfLine + EndOfLine + "_Both a native Xojo option and an MBS plugin option exist " _
+		      + "above — which fits better depends on your project (license, target platforms, features " _
+		      + "needed), so both are shown rather than picking one for you._"
+		  ElseIf allThirdParty Then
+		    sb = sb + EndOfLine + EndOfLine + "_No native Xojo documentation was found for this — the " _
+		      + "MBS plugin result above is shown because it's the closest match, but that doesn't " _
+		      + "confirm whether a native alternative exists or not._"
+		  End If
+
+		  Return sb
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function FormatResultForDisplay(r As RetrievalResult) As String
+		  // r.Text already carries any TargetPlatformLabel prefix (see
+		  // HybridSearchChunks) and RSTParser's kCodeFenceOpen/Close marks
+		  // for native docs — shown as-is, verbatim, no rewriting. A
+		  // markdown heading from the chunk's own title gives each result
+		  // a visual anchor when several are shown together.
+		  Return "#### " + r.Title + EndOfLine + EndOfLine + r.Text
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub GroupResults(query As String, conn As SQLiteDatabase, ByRef nativeResults() As RetrievalResult, ByRef mbsResults() As RetrievalResult, ByRef allThirdParty As Boolean, ByRef bothFound As Boolean)
+		  // Shared by BuildContext (legacy model-prompt path, kept for any
+		  // future use of chat generation) and BuildUserFacingAnswer (the
+		  // current path — see its comment) — same split/filter logic
+		  // either way, just rendered differently by each caller.
 		  Var pinned() As RetrievalResult = PinnedMigrationResults(query, conn)
 		  Var docResults() As RetrievalResult = SearchChunks(query, ChunkSearchLimit(query), conn)
 
@@ -1156,7 +1272,7 @@ Protected Module Retrieval
 		    Next
 		    If Not dup Then results.Add(d)
 		  Next
-		  If results.Count = 0 Then Return ""
+		  If results.Count = 0 Then Return
 
 		  // Task 7: split into native and third-party (MBS) groups so the
 		  // context can label each block explicitly instead of presenting
@@ -1183,8 +1299,6 @@ Protected Module Retrieval
 		  // is NOT filtered; only a result that WAS scored and scored low
 		  // is dropped, so this degrades to "no filtering" gracefully
 		  // rather than hiding results when the signal isn't available.
-		  Var nativeResults() As RetrievalResult
-		  Var mbsResults() As RetrievalResult
 		  // "Does this native chunk count as a real native alternative for
 		  // Task 7's allThirdParty/bothFound decision" is separate from
 		  // "does it belong in the results/context at all" — a chunk tagged
@@ -1244,7 +1358,7 @@ Protected Module Retrieval
 		      If TargetPlatformLabel(r.Title) = "" Then nativeFoundCount = nativeFoundCount + 1
 		    Next
 		  End If
-		  Var allThirdParty As Boolean = (nativeFoundCount = 0 And mbsResults.Count > 0)
+		  allThirdParty = (nativeFoundCount = 0 And mbsResults.Count > 0)
 
 		  // Both sides found something comparable — the case Task 7 exists
 		  // for. The model cannot know which of native or MBS is "better"
@@ -1254,42 +1368,8 @@ Protected Module Retrieval
 		  // let the user choose, not silently pick a leader. See
 		  // BothSourcesNote — same "short marker here, real instruction
 		  // after ClosingReminders" pattern as kAllThirdPartyMarker below.
-		  Var bothFound As Boolean = (nativeFoundCount > 0 And mbsResults.Count > 0)
-
-		  // Short markers, not the full note text, are embedded here — the
-		  // model largely ignores instructions placed BEFORE a large Context
-		  // block (see XDOXSession.ClosingReminders' "burger test" comment),
-		  // confirmed live: putting the full AllThirdPartyNote() text at the
-		  // top of the docs context did NOT stop the model from opening a
-		  // reply with "No, not with a native Xojo control." XDOXSession.
-		  // PrepareRequest strips these markers back out of context and
-		  // appends the actual note text to sysPrompt AFTER ClosingReminders
-		  // instead, where instructions actually stick.
-		  Var sb As String = ""
-		  If allThirdParty Then
-		    sb = sb + kAllThirdPartyMarker + EndOfLine + EndOfLine
-		  ElseIf bothFound Then
-		    sb = sb + kBothSourcesMarker + EndOfLine + EndOfLine
-		  End If
-
-		  If nativeResults.Count > 0 Then
-		    sb = sb + "[Native Xojo Docs]" + EndOfLine
-		    For di As Integer = 0 To nativeResults.Count - 1
-		      If di > 0 Then sb = sb + EndOfLine + "---" + EndOfLine + EndOfLine
-		      sb = sb + nativeResults(di).Text
-		    Next
-		  End If
-		  If mbsResults.Count > 0 Then
-		    If nativeResults.Count > 0 Then sb = sb + EndOfLine + EndOfLine
-		    sb = sb + "[Third-Party (MBS Plugin) Docs]" + EndOfLine
-		    For di As Integer = 0 To mbsResults.Count - 1
-		      If di > 0 Then sb = sb + EndOfLine + "---" + EndOfLine + EndOfLine
-		      sb = sb + mbsResults(di).Text
-		    Next
-		  End If
-
-		  Return sb
-		End Function
+		  bothFound = (nativeFoundCount > 0 And mbsResults.Count > 0)
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21

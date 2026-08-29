@@ -175,25 +175,13 @@ Implements XDOXSessionDelegate
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub OnCodeUnverified(symbols() As String)
-		  // Called AFTER OnDone/finalizeMessage — flagUnverifiedCode finds the
-		  // most recently finalized assistant bubble and attaches a warning to
-		  // it, rather than trying to inject anything into the still-streaming
-		  // bubble. See SymbolCheck.FindUnverifiedSymbolsInCode's comment for
-		  // why this only fires on code-block symbols, not the full reply.
-		  Var arr As New JSONItem("[]")
-		  For Each s As String In symbols
-		    arr.Add(s)
-		  Next
-		  EvaluateJavaScript("flagUnverifiedCode(" + arr.ToString + ")")
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
 		Sub OnCannedResponse(text As String)
-		  // Deterministic replies (retrieval no-match gate) render as one atomic
-		  // JS call — see showCannedResponse's comment for why separate
-		  // OnToken+OnDone calls aren't used here.
+		  // XDOXSession no longer calls the chat-completion model at all
+		  // (2026-08-29 redesign — see its PrepareRequest comment): every
+		  // reply, matched-documentation or no-match alike, renders through
+		  // this single atomic JS call rather than token-by-token streaming.
+		  // showCannedResponse's own comment has the original race-condition
+		  // rationale for why append+finalize must happen as one call.
 		  EvaluateJavaScript("showCannedResponse(" + JSONEscape(text) + ")")
 		End Sub
 	#tag EndMethod
@@ -201,12 +189,6 @@ Implements XDOXSessionDelegate
 	#tag Method, Flags = &h0
 		Sub OnError(message As String)
 		  EvaluateJavaScript("showError(" + JSONEscape(message) + ")")
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Sub OnToken(TheString As String)
-		  EvaluateJavaScript("appendToken(" + JSONEscape(TheString) + ")")
 		End Sub
 	#tag EndMethod
 

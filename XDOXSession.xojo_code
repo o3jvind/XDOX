@@ -7,345 +7,12 @@ Public Class XDOXSession
 		End Sub
 	#tag EndMethod
 
-	#tag Method, Flags = &h21
-		Private Function BaseInstructions() As String
-		  Return "You are XDOX, an expert assistant for the Xojo programming language. " _
-		    + "You help developers understand Xojo APIs, solve coding problems, and write idiomatic Xojo code." _
-		    + EndOfLine + EndOfLine _
-		    + "CRITICAL: Always write code examples in modern Xojo (API 2) syntax only. " _
-		    + "Xojo uses 'Var x As Type', arrays are declared as 'Var items() As FolderItem', " _
-		    + "and items are added with 'items.Add(item)'. " _
-		    + "Never use TypeScript, JavaScript, Swift, or any other language." _
-		    + EndOfLine + EndOfLine _
-		    + "The documentation context contains only modern API 2 pages, plus deprecation lists and " _
-		    + "migration notes that map old API 1 names to their replacements (e.g. MsgBox → MessageBox, " _
-		    + "PushButton → DesktopButton, Date → DateTime, 'Dim' → 'Var'). The old names still compile — " _
-		    + "they are deprecated, not invalid — so never claim a legacy name is an error; when one comes " _
-		    + "up, name the modern replacement and answer in terms of it. Write your own code examples " _
-		    + "exclusively in modern API 2 form unless the user explicitly asks about legacy code." _
-		    + EndOfLine + EndOfLine _
-		    + "Answer concisely and accurately. Use Markdown formatting for code examples. " _
-		    + "Start every reply with the substance — never with flattery or filler like 'Great question' " _
-		    + "or 'You're absolutely right'. When the user asks whether something exists or is true, open " _
-		    + "with the fact itself ('Xojo has a JSONItem class...'), not with praise or validation. " _
-		    + "Ground every factual claim about Xojo — APIs, syntax, class members, version history, " _
-		    + "recommendations — in the Context section below, and copy method signatures and calling " _
-		    + "styles exactly as the context shows them (for example, a setter documented with Assigns is " _
-		    + "written 'item.Value(""key"") = x', not 'item.Value(""key"", x)'). Example code must be " _
-		    + "valid Xojo that compiles: create objects with New before using them, and JSON itself only " _
-		    + "allows double-quoted strings — never write a JSON literal with single quotes. If the " _
-		    + "context does not cover something and you are not certain of it, say plainly that you don't " _
-		    + "know — do not invent APIs, behaviours, or history." _
-		    + EndOfLine + EndOfLine _
-		    + "NEVER fabricate sources or evidence. Do not invent quotes, forum posts, URLs, blog " _
-		    + "articles, conference talks, named people, statistics, or version numbers. Only quote text " _
-		    + "or cite a URL if it appears in the context. If asked where your information comes from, " _
-		    + "answer honestly: the documentation context you were given, or your general training — " _
-		    + "never claim to have searched the web or read a forum." _
-		    + EndOfLine + EndOfLine _
-		    + "When your own training knowledge and the documentation context disagree, or when the " _
-		    + "context doesn't mention something you recall from training, always defer to the context " _
-		    + "and say what it — or its absence — actually shows. Training-knowledge recall is not a " _
-		    + "substitute for checking the context: a class, method, or property you 'remember' but that " _
-		    + "isn't in the context is not confirmed to exist, and a plausible-sounding API name from " _
-		    + "training is exactly how a wrong answer happens. If the context doesn't contain something, " _
-		    + "say so plainly instead of filling the gap from memory." _
-		    + EndOfLine + EndOfLine _
-		    + "When the user pushes back on something you said, do not reflexively agree. Re-check the " _
-		    + "context: if it supports your answer, stand by it and point to the documentation; if you " _
-		    + "were wrong, admit it in one sentence and give the correction. Never invent supporting " _
-		    + "evidence to defend an earlier claim." _
-		    + EndOfLine + EndOfLine _
-		    + "When the user's message includes their own notes, treat them as authoritative: " _
-		    + "incorporate what they say into your answer and mention that it comes from the user's notes."
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function ClosingReminders() As String
-		  // Appended AFTER the RAG context. Same lesson as the notes preamble
-		  // (the burger test): this model ignores instructions buried before a
-		  // large Context block — style rules only stick when they come last.
-		  Return "Final reminders (these override any habits from your training): " _
-		    + "Never answer from training-knowledge memory alone — verify every class, method, and " _
-		    + "property name against the Context above, even when you feel certain. If it isn't in the " _
-		    + "Context, say you don't know rather than naming something you merely recall. " _
-		    + "Start your reply directly with the substance — never 'You're absolutely right', " _
-		    + "'Great question' or other praise or validation. " _
-		    + "JSON strings use double quotes only — never single quotes. " _
-		    + "In Xojo code an embedded double quote is written by doubling it ("""") — " _
-		    + "never with a backslash escape like \"". " _
-		    + "Objects must be created with New before use. " _
-		    + "Only state what the documentation context supports. " _
-		    + "Xojo targets multiple platforms (Desktop, Web, iOS, Console, Android) with " _
-		    + "DIFFERENT, INCOMPATIBLE class libraries — a class name starting with 'Desktop' " _
-		    + "only exists in desktop apps, 'Web' only in web apps, and so on; they are not " _
-		    + "interchangeable, and a Context chunk tagged '[Web-target class]', " _
-		    + "'[Desktop-target class]' etc. is telling you exactly which platform that class " _
-		    + "belongs to. If the user asks about a DESKTOP app (or doesn't say, which defaults " _
-		    + "to desktop) and the only Context you have is tagged for a DIFFERENT target, the " _
-		    + "correct answer is 'No, not with a desktop-native class — that class is Web-target " _
-		    + "only' or similar, followed by a plain 'I don't know of a desktop equivalent in the " _
-		    + "provided context' if none is present. This is a hard rule, not a suggestion: " _
-		    + "NEVER open with 'Yes' and then walk it back with 'however' — if the only supporting " _
-		    + "class is tagged for the wrong platform, the answer starts with No, not Yes. Do not " _
-		    + "resolve the mismatch by inventing a class name that sounds right for the platform " _
-		    + "the user asked about (e.g. a plausible-sounding 'WebBrowser' or similar) — say " _
-		    + "plainly that the context doesn't show a match for that platform instead. " _
-		    + "Every Context chunk for a class member has a 'Type: method' / 'Type: event' / " _
-		    + "'Type: property' line — this is a hard rule, not a style note: an event is a " _
-		    + "CALLBACK the framework invokes and expects you to IMPLEMENT and return a value " _
-		    + "from, never something you call yourself to create or fetch a value. If a member's " _
-		    + "Type is 'event', your code example must define it as an event handler (e.g. " _
-		    + "'Sub Xxx.EventName(...) Handles Xxx.EventName' or the block-event-handler form " _
-		    + "shown in the context, returning the documented value), and your prose must call " _
-		    + "it an event, never a method. NEVER write code that calls an event directly as if " _
-		    + "it were a factory or getter (e.g. 'browser = SomeClass.SomeEvent(url, request)' is " _
-		    + "always wrong for a Type: event member — that pattern belongs to a Type: method or " _
-		    + "Type: shared method member instead). If you are not certain how a class assembles " _
-		    + "and displays its control instance from the context given, say so rather than " _
-		    + "inventing a plausible-looking property or method call (e.g. a made-up " _
-		    + "'Window.SomeProperty = control' assignment) that is not shown in the context. " _
-		    + "A property chunk marked '(Read only property)' can ONLY be read (e.g. " _
-		    + "'Var x = browser.URL'), never assigned to — this is a hard rule: NEVER write " _
-		    + "'browser.SomeProperty = value' for a property documented as read-only. If the " _
-		    + "context shows a read-only property alongside a method that achieves the same " _
-		    + "goal (e.g. a documented 'LoadURL(url As String)' method next to a read-only " _
-		    + "'URL as String' property), use the method to set the value and the property only " _
-		    + "to read it back — do not assign to the read-only property just because its name " _
-		    + "matches what you're trying to set. " _
-		    + "This is a hard rule, not a style note: write every code example in modern Xojo " _
-		    + "API 2 syntax ONLY — 'Var x As Type', never 'Dim x As Type'; a plain 'Sub Open()' " _
-		    + "or 'Sub Pressed()' event-handler declaration, never the 'EventHandler Sub Xxx()' " _
-		    + "form. If you are not certain a method, property, or helper exists — for example a " _
-		    + "way to look up a specific control or window at runtime by name, such as " _
-		    + "'FindWindow', 'FindControl', or 'FindPage' — do not invent one just because the " _
-		    + "code you're writing would need it to work: only call something shown in the " _
-		    + "Context above, and if the Context doesn't show how to do the step you need, say so " _
-		    + "instead of writing plausible-looking code around a made-up call. " _
-		    + "This is the strongest hard rule of all: do NOT write your own code examples " _
-		    + "from scratch. If the Context above contains a code example for the class or " _
-		    + "method you are answering about, reproduce THAT example as closely as possible — " _
-		    + "copy its calls, variable handling, and structure rather than composing a new " _
-		    + "example yourself, even a small one. Only lightly adapt names/values to fit the " _
-		    + "user's stated scenario; never introduce a call, property, or step that is not in " _
-		    + "the example you are copying from. If the Context does NOT contain a usable code " _
-		    + "example for what the user is asking, say so plainly ('the documentation I have " _
-		    + "doesn't include a code example for this') and describe the relevant class/method " _
-		    + "names in prose instead — do not fill the gap by inventing one."
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function BuildRequestJSON(sysPrompt As String, userMessage As String) As String
-		  Var body As New JSONItem
-		  Var messages As New JSONItem
-
-		  Var sys As New JSONItem
-		  sys.Value("role") = "system"
-		  sys.Value("content") = sysPrompt
-		  messages.Add(sys)
-
-		  For Each p As Pair In mHistory
-		    Var m As New JSONItem
-		    m.Value("role") = p.Left.StringValue
-		    m.Value("content") = p.Right.StringValue
-		    messages.Add(m)
-		  Next
-
-		  Var usr As New JSONItem
-		  usr.Value("role") = "user"
-		  usr.Value("content") = userMessage
-		  messages.Add(usr)
-
-		  body.Value("messages") = messages
-		  body.Value("stream") = True
-		  body.Value("cache_prompt") = True
-		  // Factual-assistant sampling. llama-server's defaults (temperature 0.8)
-		  // are tuned for creative chat and let small models free-associate fake
-		  // facts and citations. Not 0.0 either — pure greedy decoding can trap
-		  // Qwen-family models in repetition loops.
-		  body.Value("temperature") = 0.3
-		  body.Value("top_p") = 0.9
-		  Return body.ToString
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub CleanupConnection()
-		  If mConn <> Nil Then
-		    RemoveHandler mConn.ReceivingProgressed, AddressOf OnReceivingProgressed
-		    RemoveHandler mConn.ContentReceived, AddressOf OnContentReceived
-		    RemoveHandler mConn.Error, AddressOf OnConnectionError
-		    mConn = Nil
-		  End If
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub FinishResponse()
-		  // Commit the exchange to history (partial replies included — a stopped
-		  // generation still happened from the model's point of view).
-		  If mCurrentUserMessage <> "" Then
-		    mHistory.Add(New Pair("user", mCurrentUserMessage))
-		    mHistory.Add(New Pair("assistant", mCurrentReply))
-		  End If
-
-		  // Debug-log-only diagnostic (see SymbolCheck.FindUnverifiedSymbols):
-		  // does the finished reply cite a class-name-shaped symbol that never
-		  // appeared anywhere in the retrieved context? A DIFFERENT failure
-		  // mode than the no-match gate — this can fire even when retrieval
-		  // found genuinely relevant context (confirmed live: a real ZXing/
-		  // barcode match, but the model invented "ZXingWriterMBS", which
-		  // isn't in the docs). Prose-wide, so kept log-only — see
-		  // FindUnverifiedSymbols's own comment for the false-positive rate
-		  // that ruled out acting on it directly.
-		  If mCurrentReply <> "" Then
-		    Var unverified() As String = SymbolCheck.FindUnverifiedSymbols(mCurrentReply, mCurrentContext)
-		    If unverified.Count > 0 Then
-		      App.AppendDebugLog("XDOXSession DIAG unverified symbols in reply to """ + mCurrentUserMessage + """: " + String.FromArray(unverified, ", ") + EndOfLine)
-		    End If
-
-		    // User-visible warning, scoped to CODE BLOCKS only (see
-		    // SymbolCheck.FindUnverifiedSymbolsInCode) — a 12-query test
-		    // battery (2026-08-29, see the retrieval-quality-backlog memory)
-		    // found retrieval finds the right class ~92% of the time but only
-		    // ~25% of replies had fully correct generated code, and prompt
-		    // hard rules alone had an inconsistent effect. Rather than try to
-		    // stop the model from ever fabricating a call, this surfaces an
-		    // honest signal to the user when it likely did — same principle
-		    // as MatchStatus's no-match gate, but for "retrieval succeeded,
-		    // generation still invented something" instead of "retrieval
-		    // found nothing".
-		    Var unverifiedCode() As String = SymbolCheck.FindUnverifiedSymbolsInCode(mCurrentReply, mCurrentContext)
-		    If unverifiedCode.Count > 0 And mDelegate <> Nil Then
-		      mDelegate.OnCodeUnverified(unverifiedCode)
-		    End If
-		  End If
-
-		  mCurrentUserMessage = ""
-		  mCurrentReply = ""
-		  mSSEBuffer = ""
-		  mCurrentContext = ""
-		  IsResponding = False
-		  CleanupConnection
-		  If mDelegate <> Nil Then mDelegate.OnDone
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub FailResponse(message As String)
-		  mCurrentUserMessage = ""
-		  mCurrentReply = ""
-		  mSSEBuffer = ""
-		  IsResponding = False
-		  CleanupConnection
-		  If mDelegate <> Nil Then mDelegate.OnError(message)
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnConnectionError(sender As URLConnection, err As RuntimeException)
-		  #Pragma Unused sender
-		  If Not IsResponding Then Return // already finished or stopped
-		  App.AppendDebugLog("XDOXSession connection error: " + err.Message + EndOfLine)
-		  If ModelManager.ServerReady Then
-		    FailResponse("Could not reach the model. Please try again.")
-		  Else
-		    FailResponse("Model is still loading — try again in a moment.")
-		  End If
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnContentReceived(sender As URLConnection, url As String, httpStatus As Integer, content As String)
-		  #Pragma Unused sender
-		  #Pragma Unused url
-		  If Not IsResponding Then Return // stopped by the user mid-flight
-
-		  If httpStatus <> 200 Then
-		    App.AppendDebugLog("XDOXSession HTTP " + httpStatus.ToString + ": " + content.Left(500) + EndOfLine)
-		    If httpStatus = 503 Then
-		      FailResponse("Model is still loading — try again in a moment.")
-		    Else
-		      FailResponse("Model request failed (HTTP " + httpStatus.ToString + ").")
-		    End If
-		    Return
-		  End If
-
-		  // Tokens already arrived via ReceivingProgressed; flush any tail still
-		  // in the SSE buffer — isFinal=True because there is no more data
-		  // coming, so an unterminated last line is still complete, not a
-		  // partial split — then finalize.
-		  ProcessSSEChunk("", True)
-		  FinishResponse
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnReceivingProgressed(sender As URLConnection, bytesReceived As Int64, totalBytes As Int64, newData As String)
-		  #Pragma Unused sender
-		  #Pragma Unused bytesReceived
-		  #Pragma Unused totalBytes
-		  If Not IsResponding Then Return
-		  If newData = "" Then Return
-		  ProcessSSEChunk(newData, False)
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub ProcessSSEChunk(newData As String, isFinal As Boolean = False)
-		  // Accumulate raw bytes, emit only complete lines; an SSE event or even a
-		  // multi-byte UTF-8 character can be split across network chunks, so the
-		  // trailing partial line normally stays in the buffer until its newline
-		  // arrives. On the final call (isFinal, from OnContentReceived) no more
-		  // bytes are coming, so any remaining buffered text IS a complete line
-		  // even without a trailing newline — e.g. a server that closes the
-		  // connection right after its last "data: ..." line — and must be
-		  // parsed here or it's silently dropped.
-		  mSSEBuffer = mSSEBuffer + newData
-		  If mSSEBuffer = "" Then Return // stream ended cleanly on a newline; nothing to flush
-		  Var lines() As String = mSSEBuffer.Split(Chr(10))
-		  If lines.LastIndex < 0 Then // Split("") returns an EMPTY array, not [""]
-		    mSSEBuffer = ""
-		    Return
-		  End If
-		  Var completeCount As Integer = lines.LastIndex - 1
-		  If isFinal Then
-		    mSSEBuffer = ""
-		    completeCount = lines.LastIndex
-		  Else
-		    mSSEBuffer = lines(lines.LastIndex) // possibly-incomplete tail
-		  End If
-		  For i As Integer = 0 To completeCount
-		    Var line As String = DefineEncoding(lines(i), Encodings.UTF8).Trim
-		    If Not line.BeginsWith("data:") Then Continue
-		    Var payload As String = line.Middle(5).Trim
-		    If payload = "[DONE]" Or payload = "" Then Continue
-		    Try
-		      Var j As New JSONItem(payload)
-		      If Not j.HasKey("choices") Then Continue
-		      Var choices As JSONItem = j.Child("choices")
-		      If choices.Count = 0 Then Continue
-		      Var delta As JSONItem = JSONItem(choices.ValueAt(0)).Lookup("delta", Nil)
-		      If delta = Nil Then Continue
-		      Var chunk As String = delta.Lookup("content", "").StringValue
-		      If chunk = "" Then Continue
-		      mCurrentReply = mCurrentReply + chunk
-		      If mDelegate <> Nil Then mDelegate.OnToken(chunk)
-		    Catch e As RuntimeException
-		      App.AppendDebugLog("XDOXSession SSE parse: " + e.Message + " line: " + line.Left(200) + EndOfLine)
-		    End Try
-		  Next
-		End Sub
-	#tag EndMethod
-
 	#tag Method, Flags = &h0
 		Sub Reset()
 		  // clearChat: forget the conversation. Safe mid-response — the in-flight
 		  // exchange just won't be committed to the (now empty) history.
 		  // Bump the generation so an in-flight prep callback is dropped rather
-		  // than streaming into a just-cleared session.
+		  // than rendering into a just-cleared session.
 		  mGeneration = mGeneration + 1
 		  mHistory.RemoveAll
 		End Sub
@@ -368,9 +35,10 @@ Public Class XDOXSession
 		    historySnapshot.Add(p.Right.StringValue)
 		  Next
 
-		  // RAG prep (query embedding + token-guard /tokenize) makes blocking HTTP
-		  // calls, so run it on a worker thread; it calls back into BeginStreaming
-		  // on the main thread once the prompt is ready. See ChatPrepThread.
+		  // RAG prep (query embedding + reranking) makes blocking HTTP calls to
+		  // local servers, so run it on a worker thread; it calls back into
+		  // BeginStreaming on the main thread once the answer is ready. See
+		  // ChatPrepThread.
 		  mPrep = New ChatPrepThread
 		  mPrep.Configure(Self, userMessage, historySnapshot, mGeneration)
 		  mPrep.Start
@@ -378,89 +46,44 @@ Public Class XDOXSession
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub PrepareRequest(userMessage As String, history() As String, conn As SQLiteDatabase, ByRef sysPrompt As String, ByRef requestMessage As String, ByRef historyDropCount As Integer, ByRef matchStatus As String, ByRef context As String)
+		Sub PrepareRequest(userMessage As String, history() As String, conn As SQLiteDatabase, ByRef matchStatus As String, ByRef answerText As String)
 		  // Runs on the ChatPrepThread worker — blocking HTTP is fine here.
-		  // Fresh RAG context per query — the system prompt is rebuilt every
-		  // message, which is why history lives here and not on the server.
-		  // Docs go in the system prompt; relevant notes are prepended to the
-		  // user message itself (recency — see Retrieval.BuildNotesPreamble).
+		  //
+		  // No chat-model generation happens anywhere in this function
+		  // (see Retrieval.BuildUserFacingAnswer's comment for the
+		  // 2026-08-29 decision and why): a 12-query test battery found
+		  // retrieval identifies the right class ~92% of the time but only
+		  // ~25% of chat-model-GENERATED replies had fully correct code —
+		  // and even mechanically stripping fabricated code the model wrote
+		  // anyway (tried and reverted the same day) didn't fix it, because
+		  // the model fabricated in PROSE too. This function only decides
+		  // WHETHER retrieval found something relevant (MatchStatus) and,
+		  // if so, renders the matched documentation text directly as the
+		  // answer — the chat-completion model (qwen2.5-coder, port 8091)
+		  // is no longer called by this session at all.
 		  //
 		  // Operates only on the passed-in history SNAPSHOT and the worker's own
 		  // DB connection (conn) — it never touches the session's live mHistory
-		  // or the shared DB handle, so nothing here races the main thread. The
-		  // computed historyDropCount is applied to mHistory later on the main
-		  // thread in BeginStreaming.
+		  // or the shared DB handle, so nothing here races the main thread.
 		  //
 		  // RETRIEVAL uses userMessage plus the immediately preceding user turn
 		  // (RetrievalQuery), not userMessage alone — a follow-up like "Does
 		  // Xojo have a native way of doing this" carries almost no keyword
 		  // content of its own; "this" only resolves against the prior turn.
-		  // The chat REQUEST itself still sends plain userMessage — only the
-		  // search query is augmented, so this can't put words in the user's
-		  // mouth or affect what the model is asked. Only the previous user
-		  // turn is folded in, not the assistant's reply: assistant text can
-		  // contain invented terms (see the reranker/SymbolCheck work), which
-		  // would poison the retrieval query with vocabulary the docs never
-		  // used. Kept short (last turn only) to limit how much a topic-switch
-		  // follow-up gets dragged back toward the old topic.
+		  // Only the previous user turn is folded in, not the assistant's
+		  // reply — the assistant's past turn is now always genuine
+		  // documentation text (never model-composed prose), so this is
+		  // mainly about keeping the folded-in vocabulary short and on-topic
+		  // rather than guarding against invented terms as it originally did.
 		  Var retrievalQuery As String = RetrievalQuery(userMessage, history)
 		  matchStatus = Retrieval.MatchStatus(retrievalQuery, conn)
 		  If matchStatus = Retrieval.kStatusNoMatch Then
-		    // Hard gate: no context to build, no chat-model request to prepare.
-		    // BeginStreaming short-circuits before opening a connection — see its
-		    // NoMatch branch for why (Retrieval.MatchStatus has the full
-		    // rationale for why this is control flow, not another instruction).
+		    // Hard gate: nothing relevant enough was found — see
+		    // Retrieval.MatchStatus for the full rationale.
 		    Return
 		  End If
 
-		  context = Retrieval.BuildContext(retrievalQuery, conn)
-		  requestMessage = Retrieval.BuildNotesPreamble(retrievalQuery, conn) + userMessage
-
-		  // BuildContext embeds a short marker instead of its full
-		  // third-party-only note when every retrieved chunk is MBS
-		  // documentation — see its comment. Pull the marker back OUT of the
-		  // context (the model shouldn't see raw internal markup) and append
-		  // the actual instruction text after ClosingReminders instead, where
-		  // "burger test" instructions actually stick. Confirmed live: the
-		  // full note text placed at the top of Context (before this fix)
-		  // did NOT stop "No, not with a native Xojo control" as an opener.
-		  Var allThirdParty As Boolean = context.IndexOf(Retrieval.kAllThirdPartyMarker) >= 0
-		  If allThirdParty Then
-		    context = context.ReplaceAll(Retrieval.kAllThirdPartyMarker + EndOfLine + EndOfLine, "")
-		  End If
-
-		  // Same marker-strip-and-move pattern as allThirdParty above, for
-		  // Task 7's "native and MBS both answer this" case — see
-		  // Retrieval.BuildContext/BothSourcesNote. Mutually exclusive with
-		  // allThirdParty by construction (BuildContext only sets one marker).
-		  Var bothSources As Boolean = context.IndexOf(Retrieval.kBothSourcesMarker) >= 0
-		  If bothSources Then
-		    context = context.ReplaceAll(Retrieval.kBothSourcesMarker + EndOfLine + EndOfLine, "")
-		  End If
-
-		  sysPrompt = BaseInstructions()
-		  If context <> "" Then
-		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + "Context:" + EndOfLine + context
-		  End If
-		  sysPrompt = sysPrompt + EndOfLine + EndOfLine + ClosingReminders()
-		  If allThirdParty Then
-		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + Retrieval.AllThirdPartyNote()
-		  ElseIf bothSources Then
-		    sysPrompt = sysPrompt + EndOfLine + EndOfLine + Retrieval.BothSourcesNote()
-		  End If
-
-		  // Token guard: drop RAG context first, then trim oldest history pairs.
-		  historyDropCount = 0
-		  Var limit As Integer = ModelManager.kContextSize * 0.9
-		  Var estimate As Integer = TokenCount(TranscriptText(sysPrompt, requestMessage, history, historyDropCount))
-		  If estimate > limit And context <> "" Then
-		    sysPrompt = BaseInstructions() + EndOfLine + EndOfLine + ClosingReminders()
-		    estimate = TokenCount(TranscriptText(sysPrompt, requestMessage, history, historyDropCount))
-		  End If
-		  While estimate > limit And history.Count - historyDropCount >= 2
-		    historyDropCount = historyDropCount + 2
-		    estimate = TokenCount(TranscriptText(sysPrompt, requestMessage, history, historyDropCount))
-		  Wend
+		  answerText = Retrieval.BuildUserFacingAnswer(retrievalQuery, conn)
 		End Sub
 	#tag EndMethod
 
@@ -479,13 +102,21 @@ Public Class XDOXSession
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub BeginStreaming(generation As Integer, userMessage As String, sysPrompt As String, requestMessage As String, historyDropCount As Integer, failed As Boolean, matchStatus As String, context As String)
-		  // Runs on the main thread (ChatPrepThread.UserInterfaceUpdate). Applies
-		  // the history trim the worker computed, then opens the async stream.
+		Sub BeginStreaming(generation As Integer, userMessage As String, matchStatus As String, answerText As String, failed As Boolean)
+		  // Runs on the main thread (ChatPrepThread.UserInterfaceUpdate).
+		  //
+		  // No chat-model connection is opened here — see PrepareRequest's
+		  // comment. The no-match case and the found-an-answer case both
+		  // render via OnCannedResponse (one atomic, non-streamed JS call),
+		  // since there's no token-by-token generation to stream anymore;
+		  // the answer text was already fully computed on the worker thread.
+		  // Name kept as BeginStreaming rather than renamed, since ChatPrepThread
+		  // and this method's role (main-thread continuation of a worker-thread
+		  // prep step) are otherwise unchanged.
 		  //
 		  // Drop stale callbacks: if the user stopped/reset or sent a newer
 		  // message while this prep was running, mGeneration has moved on and this
-		  // request must NOT stream. Guards the "stop, then quickly resend" race.
+		  // request must NOT render. Guards the "stop, then quickly resend" race.
 		  If generation <> mGeneration Then Return
 		  mPrep = Nil
 		  If Not IsResponding Then Return // stopped/reset while prep was running
@@ -495,118 +126,46 @@ Public Class XDOXSession
 		  Retrieval.FlushSemanticState
 
 		  If failed Then
-		    FailResponse("Could not prepare the request. Please try again.")
-		    Return
-		  End If
-
-		  If matchStatus = Retrieval.kStatusNoMatch Then
-		    // Hard gate (see Retrieval.MatchStatus): no chat-model request is
-		    // opened at all for a NoMatch query — the model cannot fabricate an
-		    // answer in a generation turn it never receives. OnCannedResponse
-		    // renders the deterministic reply as ONE atomic JS call — separate
-		    // OnToken+OnDone calls with no real time between them (unlike normal
-		    // streaming, naturally paced by SSE arrival) raced in the WebView's
-		    // JS queue and truncated the rendered text mid-word, confirmed live.
-		    // Same history-commit/state-reset FinishResponse does, minus its
-		    // OnDone call (OnCannedResponse's single call covers rendering AND
-		    // finalizing on the JS side).
-		    mHistory.Add(New Pair("user", userMessage))
-		    mHistory.Add(New Pair("assistant", kNoMatchResponse))
 		    IsResponding = False
-		    If mDelegate <> Nil Then mDelegate.OnCannedResponse(kNoMatchResponse)
+		    If mDelegate <> Nil Then mDelegate.OnError("Could not prepare the request. Please try again.")
 		    Return
 		  End If
 
-		  // Apply the token-guard trim now, on the owning thread.
-		  Var drop As Integer = historyDropCount
-		  If drop > mHistory.Count Then drop = mHistory.Count
-		  For i As Integer = 1 To drop
-		    mHistory.RemoveAt(0)
-		  Next
+		  Var replyText As String = kNoMatchResponse
+		  If matchStatus <> Retrieval.kStatusNoMatch And answerText <> "" Then replyText = answerText
 
-		  mCurrentUserMessage = userMessage
-		  mCurrentReply = ""
-		  mSSEBuffer = ""
-		  mCurrentContext = context
-
-		  mConn = New URLConnection
-		  AddHandler mConn.ReceivingProgressed, AddressOf OnReceivingProgressed
-		  AddHandler mConn.ContentReceived, AddressOf OnContentReceived
-		  AddHandler mConn.Error, AddressOf OnConnectionError
-		  mConn.RequestHeader("Accept") = "text/event-stream"
-		  // History keeps the clean user message (mCurrentUserMessage) — the
-		  // notes preamble is re-derived fresh for each new message instead of
-		  // being baked into past turns.
-		  mConn.SetRequestContent(BuildRequestJSON(sysPrompt, requestMessage), "application/json")
-		  mConn.Send("POST", ModelManager.BaseURL() + "/v1/chat/completions")
+		  // OnCannedResponse renders as ONE atomic JS call — separate
+		  // append+finalize calls with no real time between them (unlike the
+		  // old token-by-token streaming, naturally paced by SSE chunk
+		  // arrival) raced in the WebView's JS queue and truncated the
+		  // rendered text mid-word, confirmed live back when this was only
+		  // used for the no-match case; the same risk applies to any
+		  // non-streamed text, so it's used unconditionally now.
+		  mHistory.Add(New Pair("user", userMessage))
+		  mHistory.Add(New Pair("assistant", replyText))
+		  IsResponding = False
+		  If mDelegate <> Nil Then mDelegate.OnCannedResponse(replyText)
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
 		Sub StopGeneration()
-		  If Not IsResponding Or mConn = Nil Then
-		    // Still in the prep phase (no connection yet) — bump the generation so
-		    // the pending ChatPrepThread callback is recognised as stale and
-		    // never opens a stream (fixes the stop-then-resend race).
-		    Var wasResponding As Boolean = IsResponding
-		    mGeneration = mGeneration + 1
-		    IsResponding = False
-		    // Nothing streamed yet, so there's no partial reply to keep — but the
-		    // JS UI is stuck in "generating" until finalizeMessage() fires. Notify
-		    // the delegate so send/stop unlocks. Only if we were actually mid-prep.
-		    If wasResponding And mDelegate <> Nil Then mDelegate.OnDone
-		    Return
-		  End If
-		  // llama-server has no cancel API, but dropping the connection stops
-		  // generation server-side. Keep the partial reply in history and fire
-		  // OnDone so the JS side resets the send/stop buttons.
-		  Var conn As URLConnection = mConn
-		  FinishResponse
-		  conn.Disconnect
+		  // There's no in-flight streaming connection to cancel anymore
+		  // (PrepareRequest/BeginStreaming render atomically, not token by
+		  // token) — the only thing that can be "in progress" is the
+		  // worker-thread retrieval prep itself. Bumping mGeneration marks
+		  // any pending ChatPrepThread callback stale so BeginStreaming
+		  // drops it when it arrives (fixes the stop-then-resend race).
+		  Var wasResponding As Boolean = IsResponding
+		  mGeneration = mGeneration + 1
+		  IsResponding = False
+		  If wasResponding And mDelegate <> Nil Then mDelegate.OnDone
 		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function TokenCount(text As String) As Integer
-		  // POST /tokenize on the local server. Returns -1 when unavailable —
-		  // callers treat that as "guard can't run", not as an error.
-		  Try
-		    Var body As New JSONItem
-		    body.Value("content") = text
-		    Var conn As New URLConnection
-		    conn.SetRequestContent(body.ToString, "application/json")
-		    Var raw As String = conn.SendSync("POST", ModelManager.BaseURL() + "/tokenize", 10)
-		    Var j As New JSONItem(raw)
-		    If j.HasKey("tokens") Then Return j.Child("tokens").Count
-		  Catch e As RuntimeException
-		    App.AppendDebugLog("XDOXSession.TokenCount: " + e.Message + EndOfLine)
-		  End Try
-		  Return -1
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function TranscriptText(sysPrompt As String, userMessage As String, history() As String, historyDropCount As Integer) As String
-		  // Flat text approximation of the full request for the token guard.
-		  // Operates on the history SNAPSHOT (worker thread) — historyDropCount
-		  // oldest entries are treated as already-trimmed.
-		  Var s As String = sysPrompt + EndOfLine
-		  Var start As Integer = historyDropCount
-		  If start < 0 Then start = 0
-		  For i As Integer = start To history.LastIndex
-		    s = s + history(i) + EndOfLine
-		  Next
-		  Return s + userMessage
-		End Function
 	#tag EndMethod
 
 
 	#tag Property, Flags = &h0
 		IsResponding As Boolean
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mConn As URLConnection
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -618,27 +177,11 @@ Public Class XDOXSession
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mCurrentReply As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mCurrentUserMessage As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
 		Private mDelegate As XDOXSessionDelegate
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
 		Private mHistory() As Pair
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mSSEBuffer As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mCurrentContext As String
 	#tag EndProperty
 
 	// NB: no literal comma in this default value — confirmed live that a
