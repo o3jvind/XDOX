@@ -113,7 +113,16 @@ Public Class XDOXSession
 		    + "goal (e.g. a documented 'LoadURL(url As String)' method next to a read-only " _
 		    + "'URL as String' property), use the method to set the value and the property only " _
 		    + "to read it back — do not assign to the read-only property just because its name " _
-		    + "matches what you're trying to set."
+		    + "matches what you're trying to set. " _
+		    + "This is a hard rule, not a style note: write every code example in modern Xojo " _
+		    + "API 2 syntax ONLY — 'Var x As Type', never 'Dim x As Type'; a plain 'Sub Open()' " _
+		    + "or 'Sub Pressed()' event-handler declaration, never the 'EventHandler Sub Xxx()' " _
+		    + "form. If you are not certain a method, property, or helper exists — for example a " _
+		    + "way to look up a specific control or window at runtime by name, such as " _
+		    + "'FindWindow', 'FindControl', or 'FindPage' — do not invent one just because the " _
+		    + "code you're writing would need it to work: only call something shown in the " _
+		    + "Context above, and if the Context doesn't show how to do the step you need, say so " _
+		    + "instead of writing plausible-looking code around a made-up call."
 		End Function
 	#tag EndMethod
 
