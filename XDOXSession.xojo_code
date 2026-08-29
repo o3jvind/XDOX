@@ -122,7 +122,17 @@ Public Class XDOXSession
 		    + "'FindWindow', 'FindControl', or 'FindPage' — do not invent one just because the " _
 		    + "code you're writing would need it to work: only call something shown in the " _
 		    + "Context above, and if the Context doesn't show how to do the step you need, say so " _
-		    + "instead of writing plausible-looking code around a made-up call."
+		    + "instead of writing plausible-looking code around a made-up call. " _
+		    + "This is the strongest hard rule of all: do NOT write your own code examples " _
+		    + "from scratch. If the Context above contains a code example for the class or " _
+		    + "method you are answering about, reproduce THAT example as closely as possible — " _
+		    + "copy its calls, variable handling, and structure rather than composing a new " _
+		    + "example yourself, even a small one. Only lightly adapt names/values to fit the " _
+		    + "user's stated scenario; never introduce a call, property, or step that is not in " _
+		    + "the example you are copying from. If the Context does NOT contain a usable code " _
+		    + "example for what the user is asking, say so plainly ('the documentation I have " _
+		    + "doesn't include a code example for this') and describe the relevant class/method " _
+		    + "names in prose instead — do not fill the gap by inventing one."
 		End Function
 	#tag EndMethod
 
