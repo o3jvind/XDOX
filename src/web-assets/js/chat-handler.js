@@ -89,6 +89,27 @@ function finalizeMessage() {
   scrollToBottom();
 }
 
+function flagUnverifiedCode(symbols) {
+  // Called from Xojo's OnCodeUnverified, AFTER finalizeMessage already ran
+  // (currentAssistantBubble is null by then) — so this finds the most
+  // recently rendered assistant bubble directly rather than relying on a
+  // module-level reference to it. Attaches a warning banner rather than
+  // touching the bubble's own rendered markdown, so nothing about the
+  // model's actual reply is edited or hidden.
+  if (!symbols || symbols.length === 0) return;
+  const bubbles = chatArea().querySelectorAll('.message.assistant');
+  if (bubbles.length === 0) return;
+  const bubble = bubbles[bubbles.length - 1];
+  if (bubble.querySelector('.code-unverified-warning')) return; // don't double-flag
+
+  const warning = document.createElement('div');
+  warning.className = 'code-unverified-warning';
+  warning.textContent = 'This code could not be fully verified against the documentation — check before using: '
+    + symbols.join(', ');
+  bubble.appendChild(warning);
+  scrollToBottom();
+}
+
 function showThinkingIndicator() {
   removeThinkingIndicator();
   const el = document.createElement('div');

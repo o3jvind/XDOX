@@ -1,6 +1,75 @@
 #tag Module
 Protected Module SymbolCheck
 	#tag Method, Flags = &h0
+		Function FindUnverifiedSymbolsInCode(reply As String, context As String) As String()
+		  // Same detector as FindUnverifiedSymbols, scoped to fenced code
+		  // blocks only — see ExtractCodeBlocks for why. Used to decide
+		  // whether to show the user a "this code could not be verified"
+		  // warning (XDOXSession.FinishResponse), unlike
+		  // FindUnverifiedSymbols's prose-wide scan, which stays a
+		  // debug-log-only diagnostic because prose false-positives
+		  // ("Here", "However", "Choose"...) are too frequent to act on
+		  // directly — code-block symbols are a much cleaner signal
+		  // (a PascalCase word inside ```xojo``` is a class/method/property
+		  // reference far more reliably than one in a sentence).
+		  Var blocks() As String = ExtractCodeBlocks(reply)
+		  Var seen As New Dictionary
+		  Var unverified() As String
+		  For Each block As String In blocks
+		    For Each sym As String In ExtractPascalCaseWords(block)
+		      If context.IndexOf(sym) < 0 And Not seen.HasKey(sym) Then
+		        seen.Value(sym) = True
+		        unverified.Add(sym)
+		      End If
+		    Next
+		  Next
+		  Return unverified
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function ExtractCodeBlocks(reply As String) As String()
+		  // Pulls out the content of every ```xojo ... ``` (or bare ``` ...
+		  // ```) fenced block — the model always wraps code this way (see
+		  // BaseInstructions: "Use Markdown formatting for code examples").
+		  // Scoping symbol-verification to just these blocks, rather than the
+		  // whole reply, is what makes acting on the signal viable: prose
+		  // sentences constantly contain capitalized words that are real
+		  // English, not Xojo API names (see FindUnverifiedSymbols's
+		  // long-documented false-positive list), but a PascalCase token
+		  // actually used as an identifier inside a code block is a much
+		  // stronger signal that it's meant to be a real API call.
+		  // String.IndexOf in this Xojo version only takes (searchString,
+		  // options, locale) — no startIndex overload — so scanning forward
+		  // through the reply means re-searching Middle(reply, searchFrom)
+		  // each time and adding searchFrom back to get an absolute offset,
+		  // rather than passing an index into IndexOf directly.
+		  Var result() As String
+		  Var searchFrom As Integer = 0
+		  Do
+		    Var remainder As String = reply.Middle(searchFrom)
+		    Var relStart As Integer = remainder.IndexOf("```")
+		    If relStart < 0 Then Exit
+		    Var startPos As Integer = searchFrom + relStart
+		    Var afterFence As Integer = startPos + 3
+		    // Skip an optional language tag on the opening fence (e.g. "xojo")
+		    // up to the next newline, same convention chat-handler.js's marked
+		    // rendering already assumes.
+		    Var afterFenceRemainder As String = reply.Middle(afterFence)
+		    Var relLineEnd As Integer = afterFenceRemainder.IndexOf(EndOfLine)
+		    Var contentStart As Integer = If(relLineEnd >= 0, afterFence + relLineEnd + 1, afterFence)
+		    Var contentRemainder As String = reply.Middle(contentStart)
+		    Var relEnd As Integer = contentRemainder.IndexOf("```")
+		    If relEnd < 0 Then Exit // unterminated fence — ignore the tail
+		    Var endPos As Integer = contentStart + relEnd
+		    result.Add(reply.Middle(contentStart, endPos - contentStart))
+		    searchFrom = endPos + 3
+		  Loop
+		  Return result
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Function FindUnverifiedSymbols(reply As String, context As String) As String()
 		  // Debug-log-only diagnostic (no user-visible effect yet — see the
 		  // ZXingWriterMBS case this exists to catch): extracts PascalCase,

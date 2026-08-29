@@ -197,12 +197,29 @@ Public Class XDOXSession
 		  // mode than the no-match gate — this can fire even when retrieval
 		  // found genuinely relevant context (confirmed live: a real ZXing/
 		  // barcode match, but the model invented "ZXingWriterMBS", which
-		  // isn't in the docs). No user-visible effect yet — validating the
-		  // detector's accuracy before deciding whether/how to act on it.
+		  // isn't in the docs). Prose-wide, so kept log-only — see
+		  // FindUnverifiedSymbols's own comment for the false-positive rate
+		  // that ruled out acting on it directly.
 		  If mCurrentReply <> "" Then
 		    Var unverified() As String = SymbolCheck.FindUnverifiedSymbols(mCurrentReply, mCurrentContext)
 		    If unverified.Count > 0 Then
 		      App.AppendDebugLog("XDOXSession DIAG unverified symbols in reply to """ + mCurrentUserMessage + """: " + String.FromArray(unverified, ", ") + EndOfLine)
+		    End If
+
+		    // User-visible warning, scoped to CODE BLOCKS only (see
+		    // SymbolCheck.FindUnverifiedSymbolsInCode) — a 12-query test
+		    // battery (2026-08-29, see the retrieval-quality-backlog memory)
+		    // found retrieval finds the right class ~92% of the time but only
+		    // ~25% of replies had fully correct generated code, and prompt
+		    // hard rules alone had an inconsistent effect. Rather than try to
+		    // stop the model from ever fabricating a call, this surfaces an
+		    // honest signal to the user when it likely did — same principle
+		    // as MatchStatus's no-match gate, but for "retrieval succeeded,
+		    // generation still invented something" instead of "retrieval
+		    // found nothing".
+		    Var unverifiedCode() As String = SymbolCheck.FindUnverifiedSymbolsInCode(mCurrentReply, mCurrentContext)
+		    If unverifiedCode.Count > 0 And mDelegate <> Nil Then
+		      mDelegate.OnCodeUnverified(unverifiedCode)
 		    End If
 		  End If
 

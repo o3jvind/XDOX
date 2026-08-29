@@ -175,6 +175,21 @@ Implements XDOXSessionDelegate
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Sub OnCodeUnverified(symbols() As String)
+		  // Called AFTER OnDone/finalizeMessage — flagUnverifiedCode finds the
+		  // most recently finalized assistant bubble and attaches a warning to
+		  // it, rather than trying to inject anything into the still-streaming
+		  // bubble. See SymbolCheck.FindUnverifiedSymbolsInCode's comment for
+		  // why this only fires on code-block symbols, not the full reply.
+		  Var arr As New JSONItem("[]")
+		  For Each s As String In symbols
+		    arr.Add(s)
+		  Next
+		  EvaluateJavaScript("flagUnverifiedCode(" + arr.ToString + ")")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Sub OnCannedResponse(text As String)
 		  // Deterministic replies (retrieval no-match gate) render as one atomic
 		  // JS call — see showCannedResponse's comment for why separate
