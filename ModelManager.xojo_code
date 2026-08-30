@@ -577,20 +577,33 @@ Protected Module ModelManager
 
 		  // A stale embedding server (old start-server.sh workflow, previous debug
 		  // run) may already own port 8089 — adopt it rather than double-bind.
-		  // Adoption additionally requires the rope-scaled 8192 context regime:
-		  // vectors from a 2048-capped server live in a different embedding space,
-		  // so a stale old-regime instance is killed and relaunched instead ("our
-		  // model on our port" implies it is an orphan XDOX once started).
+		  // Adoption additionally requires the rope-scaled 8192-per-slot context
+		  // regime: vectors from a 2048-capped server live in a different
+		  // embedding space, so a stale old-regime instance is killed and
+		  // relaunched instead ("our model on our port" implies it is an orphan
+		  // XDOX once started).
+		  //
+		  // ALSO checks total slots (ProbeSlotCount) — added alongside the
+		  // --parallel 1→2 bump (embed-phase parallelization, 2026-08-30),
+		  // same reasoning as StartRerankServer's identical check: n_ctx alone
+		  // can't distinguish an old single-slot server from the new 2-slot
+		  // one, since ctx-size was scaled proportionally and both report
+		  // n_ctx=8192 per slot — a stale --parallel 1 server would otherwise
+		  // pass this check and get silently adopted, capping embedding at one
+		  // request in flight with no error logged. Slot count 0 (older
+		  // llama-server build, field absent) is treated as "unknown" and does
+		  // NOT force a replace — only a CONFIRMED single-slot server does.
 		  Var probe As String = ProbeExistingServerOn(EmbedBaseURL(), modelFi.NativePath)
 		  If probe = "adopt" Then
-		    If ProbeSlotCtx(EmbedBaseURL()) = 8192 Then
+		    Var slots As Integer = ProbeSlotCount(EmbedBaseURL())
+		    If ProbeSlotCtx(EmbedBaseURL()) = 8192 And slots <> 1 Then
 		      mEmbedAdopted = True
 		      App.AppendDebugLog("ModelManager: adopted existing embedding server on port " + kEmbedPort + EndOfLine)
 		      OnEmbedServerBecameReady
 		      StartAdoptedEmbedWatchdog
 		      Return
 		    End If
-		    App.AppendDebugLog("ModelManager: stale embedding server runs the old 2048-token regime — replacing it" + EndOfLine)
+		    App.AppendDebugLog("ModelManager: stale embedding server runs the old 2048-token or single-slot regime — replacing it" + EndOfLine)
 		    KillAdoptedServer(kEmbedPort)
 		    For i As Integer = 1 To 10
 		      If ProbeExistingServerOn(EmbedBaseURL(), modelFi.NativePath) = "none" Then Exit
@@ -617,18 +630,34 @@ Protected Module ModelManager
 		  // .75). Newer llama-server hard-caps the slot context to the GGUF's
 		  // training-context metadata regardless of rope flags, so that key must
 		  // be overridden too. XDOX chunks run up to 8000 chars (~2000+ tokens)
-		  // and a single input must fit the slot — one slot, full context (the
-		  // server otherwise defaults to 4 slots sharing the budget).
+		  // and a single input must fit the slot — llama-server splits ctx-size
+		  // evenly across parallel slots, so ctx-size must scale with --parallel
+		  // to keep each slot's own budget at the required 8192.
 		  // NB: these flags define the embedding space — changing them makes all
 		  // stored vectors incompatible (full re-embed required).
+		  //
+		  // 2 slots, not 1 (embed-phase parallelization, 2026-08-30): the
+		  // client-side embed loop (Embedder.EmbedPendingChunks) now runs up to
+		  // 2 EmbedWorker threads concurrently — with --parallel 1 the second
+		  // request queues behind the first INSIDE this server regardless of
+		  // Xojo-side threading, capping the actual throughput win. ctx-size
+		  // doubled to 16384 (2 x 8192) so each of the 2 slots keeps its
+		  // existing 8192-token budget rather than being halved. NOT verified
+		  // safe to raise further than 2 on this hardware (M1 Max, 32GB): each
+		  // parallel slot allocates its own full ctx-size KV-cache under -ngl 99
+		  // full GPU offload, and StartRerankServer's identical --parallel bump
+		  // has an existing comment noting a prior attempt to give one slot the
+		  // model's full native context crashed the server silently on launch —
+		  // the same failure mode a bigger multiply here could hit again. Only
+		  // 2 concurrent embed workers are ever spawned — no need to go higher.
 		  args.Add("--ctx-size")
-		  args.Add("8192")
+		  args.Add("16384")
 		  args.Add("--batch-size")
-		  args.Add("8192")
+		  args.Add("16384")
 		  args.Add("--ubatch-size")
-		  args.Add("8192")
+		  args.Add("16384")
 		  args.Add("--parallel")
-		  args.Add("1")
+		  args.Add("2")
 		  args.Add("--rope-scaling")
 		  args.Add("yarn")
 		  args.Add("--rope-freq-scale")

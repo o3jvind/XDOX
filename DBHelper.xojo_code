@@ -35,6 +35,16 @@ Public Module DBHelper
 		  Try
 		    Var db As New SQLiteDatabase
 		    db.DatabaseFile = f
+		    // Explicit busy-wait timeout (Xojo's own documented default is 10s,
+		    // but a real "database is locked" DatabaseException was observed
+		    // live, 2026-08-30, with 2 concurrent EmbedWorker connections both
+		    // writing — SQLite's busy handler retries internally up to this
+		    // many seconds before giving up, so a more generous value lets a
+		    // second writer's short BeginTransaction/CommitTransaction window
+		    // simply wait its turn instead of erroring out silently (errors
+		    // here are caught-and-logged by callers like StoreChunkEmbedding,
+		    // not surfaced, so a too-short timeout fails quietly).
+		    db.Timeout = 30
 		    db.Connect
 		    db.ExecuteSQL("PRAGMA journal_mode=WAL")
 		    Return db

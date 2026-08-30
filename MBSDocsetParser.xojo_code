@@ -76,55 +76,149 @@ Public Class MBSDocsetParser
 		  End If
 
 		  Var emptyAnchorSet As New Dictionary
-		  Var filesDone As Integer = 0
-		  Var unindexedCount As Integer = 0
-		  Var total As Integer = list.Count
-		  If progressDelegate <> Nil Then progressDelegate.MBSParseProgress(0, total)
-		  For i As Integer = 0 To total - 1
+		  Var htmlFiles() As FolderItem
+		  Var htmlNames() As String
+		  For i As Integer = 0 To list.Count - 1
 		    If list.Directory(i) Then Continue
 		    Var name As String = list.Name(i)
 		    If name.Right(5) <> ".html" Then Continue
 		    Var f As FolderItem = list.Item(i)
 		    If f = Nil Then Continue
+		    htmlFiles.Add(f)
+		    htmlNames.Add(name)
+		  Next
 
+		  Var total As Integer = htmlFiles.Count
+		  If progressDelegate <> Nil Then progressDelegate.MBSParseProgress(0, total)
+		  If total = 0 Then
+		    App.AppendDebugLog("MBSDocsetParser: produced 0 chunks from 0 files" + EndOfLine)
+		    Return chunks
+		  End If
+
+		  // Split into System.CoreCount contiguous slices — not round-robin —
+		  // so each worker's ResultChunks() is already in original file order
+		  // and the merge below is a plain index-ordered concatenation with no
+		  // re-sorting needed.
+		  Var workerCount As Integer = System.CoreCount
+		  If workerCount > total Then workerCount = total
+		  If workerCount < 1 Then workerCount = 1
+
+		  Var workers() As MBSParseWorker
+		  Var baseSize As Integer = total \ workerCount
+		  Var remainder As Integer = total Mod workerCount
+		  Var startIdx As Integer = 0
+		  For w As Integer = 0 To workerCount - 1
+		    Var sliceSize As Integer = baseSize
+		    If w < remainder Then sliceSize = sliceSize + 1
+		    If sliceSize = 0 Then Continue
+		    Var worker As New MBSParseWorker
+		    For k As Integer = startIdx To startIdx + sliceSize - 1
+		      worker.Files.Add(htmlFiles(k))
+		      worker.Names.Add(htmlNames(k))
+		    Next
+		    worker.AnchorsByFile = anchorsByFile
+		    worker.EmptyAnchorSet = emptyAnchorSet
+		    Var doneCount() As Integer
+		    doneCount.Add(0)
+		    worker.DoneCount = doneCount
+		    workers.Add(worker)
+		    startIdx = startIdx + sliceSize
+		    worker.Start
+		  Next
+
+		  // No blocking Join exists for preemptive Threads — poll ThreadState
+		  // instead. Safe to sleep this call's own thread (MBSIndexerThread)
+		  // while waiting, since it isn't the main/UI thread. Progress is
+		  // summed from each worker's own lock-free DoneCount(0) here, on
+		  // this single polling thread, rather than workers each calling
+		  // AddUserInterfaceUpdate themselves — see ParseFileGroup's comment
+		  // for why the earlier CriticalSection-based shared counter was
+		  // dropped.
+		  Var allDone As Boolean = False
+		  Var lastReported As Integer = -1
+		  While Not allDone
+		    allDone = True
+		    Var sum As Integer = 0
+		    For Each worker As MBSParseWorker In workers
+		      sum = sum + worker.DoneCount(0)
+		      If worker.ThreadState <> Thread.ThreadStates.NotRunning Then allDone = False
+		    Next
+		    If progressDelegate <> Nil And sum <> lastReported Then
+		      progressDelegate.MBSParseProgress(sum, total)
+		      lastReported = sum
+		    End If
+		    If Not allDone Then Thread.SleepCurrent(50)
+		  Wend
+
+		  Var unindexedCount As Integer = 0
+		  For Each name As String In htmlNames
+		    If Not anchorsByFile.HasKey(name) Then unindexedCount = unindexedCount + 1
+		  Next
+
+		  For Each worker As MBSParseWorker In workers
+		    For Each c As DocChunk In worker.ResultChunks
+		      chunks.Add(c)
+		    Next
+		    For Each line As String In worker.LogLines
+		      App.AppendDebugLog(line + EndOfLine)
+		    Next
+		  Next
+
+		  If progressDelegate <> Nil Then progressDelegate.MBSParseProgress(total, total)
+
+		  App.AppendDebugLog("MBSDocsetParser: produced " + chunks.Count.ToString + " chunks from " + total.ToString _
+		    + " files (" + unindexedCount.ToString + " not referenced by docSet.dsidx)" + EndOfLine)
+
+		  Return chunks
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub ParseFileGroup(files() As FolderItem, names() As String, anchorsByFile As Dictionary, emptyAnchorSet As Dictionary, chunks() As DocChunk, logLines() As String, doneCount() As Integer)
+		  // Entry point for a single MBSParseWorker's file slice — the same
+		  // per-file loop body Parse used to run inline, extracted so it can
+		  // run on a worker Thread instead. ParseFile itself stays Private;
+		  // this is the only new public surface needed to reuse it.
+		  //
+		  // doneCount is a 1-element array used as a mutable box — Xojo
+		  // arrays are passed by reference, so the owner (Parse) can poll
+		  // doneCount(0) from its own wait loop without any shared lock. This
+		  // replaces an earlier ParseProgressCounter (CriticalSection-backed)
+		  // design that crashed live, 2026-08-30: with System.CoreCount (10 on
+		  // the test machine) preemptive MBSParseWorkers all calling
+		  // CriticalSection.Enter within the same few milliseconds of Start,
+		  // Xojo's own runtime threw "Cannot enter a cooperative CriticalSection
+		  // in a preemptive thread" on a SUBSET of workers even though a
+		  // temporary diagnostic confirmed the lock's own .Type read back as
+		  // Preemptive on every call right up until the failures — a real race
+		  // in Xojo's CriticalSection internals under a burst of near-
+		  // simultaneous first-time preemptive Enter calls, not a bug in this
+		  // code. Since per-file progress isn't correctness-critical (unlike
+		  // ResultChunks, which stays worker-local and lock-free by design
+		  // already), removing the shared lock entirely sidesteps the race
+		  // rather than trying to work around unclear runtime behavior.
+		  For i As Integer = 0 To files.LastIndex
+		    Var name As String = names(i)
 		    Var anchorSet As Dictionary
 		    If anchorsByFile.HasKey(name) Then
 		      anchorSet = anchorsByFile.Value(name)
 		    Else
 		      anchorSet = emptyAnchorSet
-		      unindexedCount = unindexedCount + 1
 		    End If
 
 		    Try
-		      ParseFile(f, anchorSet, chunks)
+		      ParseFile(files(i), anchorSet, chunks)
 		    Catch e As RuntimeException
 		      // One malformed page must not sink the other ~17,000 — skip it and
 		      // keep going. (An InvalidArgumentException from a numeric-entity
 		      // edge case has already been hit and fixed once; this is the
 		      // backstop for whatever the next one turns out to be.)
-		      App.AppendDebugLog("MBSDocsetParser: skipping " + name + " after exception: " + e.Message + EndOfLine)
+		      logLines.Add("MBSDocsetParser: skipping " + name + " after exception: " + e.Message)
 		    End Try
-		    filesDone = filesDone + 1
-		    If filesDone Mod 500 = 0 Then
-		      App.AppendDebugLog("MBSDocsetParser: " + filesDone.ToString _
-		        + " files parsed, " + chunks.Count.ToString + " chunks so far, last file=" + name + EndOfLine)
-		    End If
 
-		    // Progress reported against loop position (i+1), not filesDone —
-		    // filesDone only counts .html files, so it would stall short of
-		    // total (which includes every item FileListMBS sees) whenever a
-		    // run of non-.html files lands near the end of the folder listing.
-		    If (i + 1) Mod 25 = 0 Then
-		      If progressDelegate <> Nil Then progressDelegate.MBSParseProgress(i + 1, total)
-		    End If
+		    doneCount(0) = doneCount(0) + 1
 		  Next
-		  If progressDelegate <> Nil Then progressDelegate.MBSParseProgress(total, total)
-
-		  App.AppendDebugLog("MBSDocsetParser: produced " + chunks.Count.ToString + " chunks from " + filesDone.ToString _
-		    + " files (" + unindexedCount.ToString + " not referenced by docSet.dsidx)" + EndOfLine)
-
-		  Return chunks
-		End Function
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21

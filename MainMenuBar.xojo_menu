@@ -120,6 +120,14 @@ Begin Menu MainMenuBar
          AutoEnable = True
          Visible = True
       End
+      Begin DesktopMenuItem ToolsReindexNativeDocs
+         SpecialMenu = 0
+         Index = -2147483648
+         Text = "Reindex Native Docs"
+         AutoEnabled = True
+         AutoEnable = True
+         Visible = True
+      End
    End
    Begin DesktopMenuItem WindowMenu
       SpecialMenu = 0

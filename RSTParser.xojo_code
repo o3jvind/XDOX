@@ -55,24 +55,87 @@ Public Class RSTParser
 		  App.AppendDebugLog("RSTParser: Found " + pageStarts.Count.ToString + " pages (h1 sections)." + EndOfLine)
 
 		  Var pageCount As Integer = pageStarts.LastIndex
-		  For pi As Integer = 0 To pageCount
+		  If pageCount < 0 Then Return chunks
+
+		  // Split the pi=0..pageCount range into System.CoreCount contiguous
+		  // slices — not round-robin — so each worker's ResultChunks() is
+		  // already in original page order and the merge below is a plain
+		  // index-ordered concatenation with no re-sorting needed.
+		  Var pageTotal As Integer = pageCount + 1
+		  Var workerCount As Integer = System.CoreCount
+		  If workerCount > pageTotal Then workerCount = pageTotal
+		  If workerCount < 1 Then workerCount = 1
+
+		  Var workers() As RSTPageWorker
+		  Var baseSize As Integer = pageTotal \ workerCount
+		  Var remainder As Integer = pageTotal Mod workerCount
+		  Var startPi As Integer = 0
+		  For w As Integer = 0 To workerCount - 1
+		    Var sliceSize As Integer = baseSize
+		    If w < remainder Then sliceSize = sliceSize + 1
+		    If sliceSize = 0 Then Continue
+		    Var worker As New RSTPageWorker
+		    worker.Lines = lines
+		    worker.PageStarts = pageStarts
+		    worker.PageTitles = pageTitles
+		    worker.TitleCounts = titleCounts
+		    worker.LastLineIndex = lastCount
+		    worker.PageIndexFrom = startPi
+		    worker.PageIndexTo = startPi + sliceSize - 1
+		    workers.Add(worker)
+		    startPi = startPi + sliceSize
+		    worker.Start
+		  Next
+
+		  // No blocking Join exists for preemptive Threads — poll ThreadState
+		  // instead. Safe to sleep this call's own thread (IndexerThread)
+		  // while waiting, since it isn't the main/UI thread.
+		  Var allDone As Boolean = False
+		  While Not allDone
+		    allDone = True
+		    For Each worker As RSTPageWorker In workers
+		      If worker.ThreadState <> Thread.ThreadStates.NotRunning Then
+		        allDone = False
+		        Exit
+		      End If
+		    Next
+		    If Not allDone Then Thread.SleepCurrent(20)
+		  Wend
+
+		  For Each worker As RSTPageWorker In workers
+		    For Each c As DocChunk In worker.ResultChunks
+		      chunks.Add(c)
+		    Next
+		    For Each line As String In worker.LogLines
+		      App.AppendDebugLog(line + EndOfLine)
+		    Next
+		  Next
+
+		  Return chunks
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub ParsePageGroup(lines() As String, pageStarts() As Integer, pageTitles() As String, fromPi As Integer, toPi As Integer, lastLineIndex As Integer, titleCounts As Dictionary, chunks() As DocChunk)
+		  // Entry point for a single RSTPageWorker's page-index slice — the
+		  // same per-pi loop body Parse used to run inline, extracted so it
+		  // can run on a worker Thread instead. ParseAPIClassPage/
+		  // ParseGuidePage/IsAPIClassPage stay Private; this is the only new
+		  // public surface needed to reuse them.
+		  Var pageCount As Integer = pageStarts.LastIndex
+		  For pi As Integer = fromPi To toPi
 		    Var pageLineStart As Integer = pageStarts(pi)
 		    Var pageLineEnd As Integer
 		    If pi < pageCount Then
 		      pageLineEnd = pageStarts(pi + 1) - 1
-		      // pageStarts points at the NEXT page's title line itself, not
-		      // its preceding "====" overline (RST h1 titles can have both
-		      // an overline and an underline) — so pageLineEnd as computed
-		      // above can land exactly ON that overline, leaking it into
-		      // THIS page's content as trailing garbage. Confirmed live,
-		      // 2026-08-29: "=======================" showing up at the
-		      // end of rendered guide-page answers. Back up one more line
-		      // when that's what's there.
-		      If pageLineEnd >= 0 And pageLineEnd <= lastCount And IsUnderline(lines(pageLineEnd).TrimRight, "=") Then
+		      // Same overline back-up fix as the old inline loop — see
+		      // Parse's history for the "=======================" leak this
+		      // guards against.
+		      If pageLineEnd >= 0 And pageLineEnd <= lastLineIndex And IsUnderline(lines(pageLineEnd).TrimRight, "=") Then
 		        pageLineEnd = pageLineEnd - 1
 		      End If
 		    Else
-		      pageLineEnd = lastCount
+		      pageLineEnd = lastLineIndex
 		    End If
 
 		    Var pageTitle As String = pageTitles(pi)
@@ -83,9 +146,7 @@ Public Class RSTParser
 		      ParseGuidePage(lines, pageLineStart, pageLineEnd, pageTitle, titleCounts, chunks)
 		    End If
 		  Next pi
-
-		  Return chunks
-		End Function
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21

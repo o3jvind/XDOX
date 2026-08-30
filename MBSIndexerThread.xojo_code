@@ -78,7 +78,7 @@ Implements MBSParseProgressDelegate
 		      + " unchanged (skipped re-embed), " + changedCount.ToString + " new/updated" + EndOfLine)
 
 		    If ModelManager.EmbeddingModelInstalled And WaitForEmbedServer(90) Then
-		      EmbedPendingChunks(db)
+		      Embedder.EmbedPendingChunks(db, Self, DBHelper.kMBSSourcePrefix + "%")
 		    Else
 		      App.AppendDebugLog("MBSIndexerThread: embedding server not ready — skipping embed phase (will resume later)" + EndOfLine)
 		    End If
@@ -162,90 +162,6 @@ Implements MBSParseProgressDelegate
 		End Function
 	#tag EndMethod
 
-	#tag Method, Flags = &h21
-		Private Sub EmbedPendingChunks(db As SQLiteDatabase)
-		  // Identical batching/retry/failure-cap strategy as
-		  // IndexerThread.EmbedPendingChunks, scoped to MBS chunks only so a
-		  // concurrent Xojo-doc reindex (guarded out by IsRunning anyway) can
-		  // never interleave with this transaction.
-		  If db = Nil Then Return
-		  Var total As Integer = PendingMBSEmbedCount(db)
-		  If total = 0 Then Return
-		  AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", 0), New Pair("total", total))
-
-		  Var done As Integer = 0
-		  Var consecutiveFailures As Integer = 0
-		  While True
-		    Var ids() As Integer
-		    Var texts() As String
-		    Var rs As RowSet = db.SelectSQL("SELECT id, chunk_text FROM chunks WHERE embedded=0 AND source LIKE ? LIMIT " _
-		      + Embedder.kBatchSize.ToString, DBHelper.kMBSSourcePrefix + "%")
-		    While Not rs.AfterLastRow
-		      ids.Add(rs.Column("id").IntegerValue)
-		      texts.Add(rs.Column("chunk_text").StringValue)
-		      rs.MoveToNextRow
-		    Wend
-		    rs.Close
-		    If ids.Count = 0 Then Exit
-
-		    Var embs() As MemoryBlock = Embedder.EmbedBatch(texts, Embedder.kTaskPrefixDocument)
-		    If embs.Count = 0 Then
-		      consecutiveFailures = consecutiveFailures + 1
-		      If consecutiveFailures >= 5 Then
-		        App.AppendDebugLog("MBSIndexerThread: 5 consecutive embed batch failures — aborting embed phase (" _
-		          + PendingMBSEmbedCount(db).ToString + " chunks left pending)" + EndOfLine)
-		        Exit
-		      End If
-		      db.BeginTransaction
-		      mTransactionOpen = True
-		      For k As Integer = 0 To ids.LastIndex
-		        Var single As MemoryBlock = Embedder.FetchEmbedding(texts(k), Embedder.kTaskPrefixDocument, 30)
-		        If single <> Nil Then
-		          DBHelper.StoreChunkEmbedding(ids(k), single, db)
-		        Else
-		          db.ExecuteSQL("UPDATE chunks SET embedded=-1 WHERE id=?", ids(k))
-		        End If
-		      Next
-		      db.CommitTransaction
-		      mTransactionOpen = False
-		      done = done + ids.Count
-		      Continue
-		    End If
-		    consecutiveFailures = 0
-
-		    db.BeginTransaction
-		    mTransactionOpen = True
-		    For k As Integer = 0 To ids.LastIndex
-		      If k <= embs.LastIndex And embs(k) <> Nil Then
-		        DBHelper.StoreChunkEmbedding(ids(k), embs(k), db)
-		      Else
-		        db.ExecuteSQL("UPDATE chunks SET embedded=-1 WHERE id=?", ids(k))
-		      End If
-		    Next
-		    db.CommitTransaction
-		    mTransactionOpen = False
-
-		    done = done + ids.Count
-		    If done Mod 500 < ids.Count Then
-		      AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", done), New Pair("total", total))
-		    End If
-		  Wend
-		  AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", total), New Pair("total", total))
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function PendingMBSEmbedCount(db As SQLiteDatabase) As Integer
-		  Try
-		    Var rs As RowSet = db.SelectSQL("SELECT COUNT(*) AS n FROM chunks WHERE embedded=0 AND source LIKE ?", DBHelper.kMBSSourcePrefix + "%")
-		    Var n As Integer = rs.Column("n").IntegerValue
-		    rs.Close
-		    Return n
-		  Catch e As DatabaseException
-		    Return 0
-		  End Try
-		End Function
-	#tag EndMethod
 
 	#tag Method, Flags = &h21
 		Private Function WaitForEmbedServer(graceSeconds As Integer) As Boolean
