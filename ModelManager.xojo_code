@@ -14,7 +14,33 @@ Protected Module ModelManager
 		  Else
 		    EnsureEmbeddingModel
 		    EnsureRerankModel
-		    StartServer(id)
+		    // StartServer(id) — chat-model auto-start deliberately disabled
+		    // 2026-08-29. XDOXSession no longer calls the chat-completion
+		    // model at all (see its PrepareRequest comment and the
+		    // retrieval-quality-backlog memory's Task 2 phase 3): replies
+		    // now render matched documentation text directly instead of
+		    // generating one.
+		    //
+		    // Two follow-up uses were deliberately explored and rejected the
+		    // same day before disabling this, not just assumed unnecessary:
+		    // (1) query-rewriting for retrieval (e.g. folding a follow-up
+		    // like "how about android?" into a standalone search query) —
+		    // measured directly against the DB across 3 repros, mixed/no
+		    // real improvement over plain history-concatenation, same
+		    // conclusion as an earlier 2026-08-16 attempt; (2) asking ONE
+		    // narrow clarifying question back to the user when retrieval is
+		    // ambiguous or empty, explicitly told not to state any Xojo fact
+		    // — worked cleanly for pure platform-choice questions, but a
+		    // harder repro (a query touching a deprecated API) leaked an
+		    // unrequested factual claim in 3 of 5 runs despite the explicit
+		    // instruction not to. Even this narrow a generative task doesn't
+		    // reach reliable zero-fabrication at this model size.
+		    //
+		    // Left as a one-line re-enable (uncomment StartServer(id) above)
+		    // rather than ripping out the surrounding catalog/download/
+		    // picker infrastructure, which stays intact in case a future,
+		    // even-narrower use is found, or a better local model changes
+		    // this calculus.
 		  End If
 
 		  StartEmbedServer
