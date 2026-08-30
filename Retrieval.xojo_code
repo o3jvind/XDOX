@@ -12,20 +12,32 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function SearchChunks(query As String, limit As Integer = 4, conn As SQLiteDatabase = Nil) As RetrievalResult()
+		Function SearchChunks(query As String, pool As String, limit As Integer = 4, conn As SQLiteDatabase = Nil) As RetrievalResult()
 		  // Hybrid semantic+BM25 search when the embedding server answers,
 		  // BM25-only otherwise. Scoring constants are kept identical to XMCP's
 		  // SemanticSearch so both apps rank the same DB the same way.
+		  //
+		  // pool = "native" or "mbs" — split-bubble redesign (2026-08-30):
+		  // this used to search BOTH pools in one merged call
+		  // (HybridSearchChunks); now it searches exactly one, so each pool
+		  // can be gated (MatchStatusForPool) and rendered independently of
+		  // the other's timing. Callers with a docs_search_scope that
+		  // excludes a pool simply never call this for that pool at all.
 		  Var db As SQLiteDatabase = If(conn <> Nil, conn, DBHelper.DB)
 		  Var results() As RetrievalResult
 		  If db = Nil Then Return results
 
+		  Var mbsOnly As Boolean = (pool = "mbs")
+
 		  // Retrieval is scoped to the active Xojo version (plus version-independent
 		  // chunks, docs_version=''). The cache key includes it so switching version
-		  // never returns another version's cached results.
+		  // never returns another version's cached results. Also includes pool
+		  // so native/mbs never share a cache slot (they're different result
+		  // sets for the same query), and MatchStatusForPool's own cache
+		  // lookup can find the score this call stashes.
 		  Var activeVersion As String = DBHelper.GetActiveVersion
 
-		  Var cacheKey As String = activeVersion + "|" + query + "|" + limit.ToString
+		  Var cacheKey As String = activeVersion + "|" + pool + "|" + query + "|" + limit.ToString
 
 		  Var generationAtMiss As Integer
 		  mCacheLock.Enter
@@ -43,11 +55,11 @@ Protected Module Retrieval
 		    // Record the tier; the actual WebView update is flushed on the main
 		    // thread (SearchChunks may run on a worker — see ChatPrepThread).
 		    RecordSemanticState(False)
-		    results = KeywordSearchChunks(query, limit, db, activeVersion)
+		    results = KeywordSearchChunks(query, limit, db, activeVersion, mbsOnly)
 		  Else
 		    RecordSemanticState(True)
-		    results = HybridSearchChunks(query, queryEmb, limit, db, activeVersion, cacheKey, generationAtMiss)
-		    If results.Count = 0 Then results = KeywordSearchChunks(query, limit, db, activeVersion)
+		    results = SearchOnePool(query, queryEmb, limit, db, activeVersion, mbsOnly, cacheKey, generationAtMiss)
+		    If results.Count = 0 Then results = KeywordSearchChunks(query, limit, db, activeVersion, mbsOnly)
 		  End If
 
 		  mCacheLock.Enter
@@ -66,131 +78,57 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function HybridSearchChunks(query As String, queryEmb As MemoryBlock, maxResults As Integer, db As SQLiteDatabase, activeVersion As String, cacheKey As String, generationAtMiss As Integer) As RetrievalResult()
-		  // Task 7: native and MBS (third-party) docs are searched as two
-		  // separate scoped pools instead of one shared cosine/BM25 race, so
-		  // the two sources can never crowd each other out — the model
-		  // previously ended up seeing only whichever source happened to
-		  // score highest on a given phrasing, then either hallucinated the
-		  // other didn't exist or (post Task 6) could only say "can't
-		  // confirm". Presenting both as real alternatives requires actually
-		  // *finding* both first. Each pool gets its own scan, scoring,
-		  // dedup and Overview-chunk guarantee (ScopedSearch, shared code) —
-		  // only reranking and neighbour expansion run once, over the
-		  // merged, capped set. Keep in sync with XMCP SemanticSearch.
+		Private Function SearchOnePool(query As String, queryEmb As MemoryBlock, maxResults As Integer, db As SQLiteDatabase, activeVersion As String, mbsOnly As Boolean, cacheKey As String, generationAtMiss As Integer) As RetrievalResult()
+		  // Split-bubble redesign (reactive-coalescing-thimble plan, Decision
+		  // 1+2, 2026-08-30): one pool's worth of the old HybridSearchChunks
+		  // — ScopedSearch, then rerank/neighbour-expand/group JUST this
+		  // pool's own candidates, with no merge against the other pool at
+		  // all. Each pool now gates and renders fully independently, so
+		  // native and MBS chat bubbles can complete (and render) at
+		  // different times — the whole point of the redesign. This
+		  // replaces kCrossPoolGapThreshold's after-the-fact cross-pool
+		  // comparison (Retrieval.GroupResults, retired below) with a
+		  // correct-at-the-source fix: a pool's OWN best rerank score gates
+		  // whether IT has anything to show, with zero dependency on
+		  // knowing the other pool's score — which the split-bubble
+		  // architecture structurally can't have anyway when the fast pool
+		  // finishes first.
 		  Var results() As RetrievalResult
+		  Var scoped As New ScopedSearchResult
+		  ScopedSearch(query, queryEmb, maxResults, db, activeVersion, mbsOnly, scoped)
+		  If scoped.ChunkIDs.Count = 0 Then Return results
 
-		  Var nativeHalf As Integer = (maxResults + 1) \ 2 // ceiling
-		  Var mbsHalf As Integer = maxResults - nativeHalf
+		  Var chunkIDs() As Integer = scoped.ChunkIDs
+		  Var titles() As String = scoped.Titles
+		  Var texts() As String = scoped.Texts
+		  Var sources() As String = scoped.Sources
+		  Var chunkIndexes() As Integer = scoped.ChunkIndexes
+		  Var prevIDs() As Integer = scoped.PrevIDs
+		  Var nextIDs() As Integer = scoped.NextIDs
+		  Var combined() As Double = scoped.Combined
+		  Var cosScores() As Double = scoped.CosScores
+		  Var finalIdxs() As Integer = scoped.FinalIdxs
 
-		  Var native As New ScopedSearchResult
-		  Var mbs As New ScopedSearchResult
-		  ScopedSearch(query, queryEmb, nativeHalf, db, activeVersion, False, native)
-		  ScopedSearch(query, queryEmb, mbsHalf, db, activeVersion, True, mbs)
-
-		  // Neither pool is forced to fill its half with weak matches — a
-		  // pool that came back short (or empty) lets the OTHER pool use the
-		  // freed slots, so a question with a real answer on only one side
-		  // still gets the full maxResults budget instead of wasting half of
-		  // it on nothing. "Short" is measured in candidate count, not
-		  // score — ScopedSearch's own dedup/candidate selection already
-		  // discards weak matches by not having anything left to pick.
-		  //
-		  // The other side's count must be checked with >= its own half,
-		  // not >: ScopedSearch's dedup loop (`If finalIdxs.Count >=
-		  // maxResults Then Exit`) makes FinalIdxs.Count <= maxResults a
-		  // hard ceiling — a pool can never come back with MORE than it was
-		  // asked for, so `> mbsHalf`/`> nativeHalf` can never be true and
-		  // this rebalancing would never fire. ">=" means "that pool filled
-		  // its entire allocated quota" — i.e. it may have MORE candidates
-		  // available beyond what it was capped at, which is the actual
-		  // signal that re-asking it for a larger share is worth trying.
-		  If native.FinalIdxs.Count < nativeHalf And mbs.FinalIdxs.Count >= mbsHalf Then
-		    Var spare As Integer = nativeHalf - native.FinalIdxs.Count
-		    ScopedSearch(query, queryEmb, mbsHalf + spare, db, activeVersion, True, mbs)
-		  ElseIf mbs.FinalIdxs.Count < mbsHalf And native.FinalIdxs.Count >= nativeHalf Then
-		    Var spare As Integer = mbsHalf - mbs.FinalIdxs.Count
-		    ScopedSearch(query, queryEmb, nativeHalf + spare, db, activeVersion, False, native)
-		  End If
-
-		  // Native first, always — deterministic ordering rather than
-		  // whichever side scored higher, so "which source leads" doesn't
-		  // vary between otherwise-similar questions (see BuildContext,
-		  // which uses IsThirdParty to lay these out as two labeled blocks
-		  // in this same order).
-		  Var chunkIDs() As Integer
-		  Var titles() As String
-		  Var texts() As String
-		  Var sources() As String
-		  Var chunkIndexes() As Integer
-		  Var prevIDs() As Integer
-		  Var nextIDs() As Integer
-		  Var combined() As Double
-		  Var cosScores() As Double
-		  Var finalIdxs() As Integer // indexes into the arrays above, post-merge
-
-		  MergeScopedResult(native, chunkIDs, titles, texts, sources, chunkIndexes, prevIDs, nextIDs, combined, cosScores, finalIdxs)
-		  MergeScopedResult(mbs, chunkIDs, titles, texts, sources, chunkIndexes, prevIDs, nextIDs, combined, cosScores, finalIdxs)
-
-		  If chunkIDs.Count = 0 Then Return results
-
-		  // Chunk IDs that MUST reach BuildContext regardless of rerank
-		  // score — currently just each pool's Overview-guarantee chunk
-		  // (0 = "no guarantee for this pool", never a real chunk ID). See
-		  // ScopedSearchResult.OverviewChunkID's comment for why this has
-		  // to survive kMinRelevanceScore filtering.
+		  // This pool's matched-class Overview-guarantee chunk (0 = none) —
+		  // see ScopedSearchResult.OverviewChunkID's comment for why this
+		  // must survive kMinRelevanceScore filtering below.
 		  Var guaranteedChunkIDs As New Dictionary
-		  If native.OverviewChunkID > 0 Then guaranteedChunkIDs.Value(native.OverviewChunkID) = True
-		  If mbs.OverviewChunkID > 0 Then guaranteedChunkIDs.Value(mbs.OverviewChunkID) = True
+		  If scoped.OverviewChunkID > 0 Then guaranteedChunkIDs.Value(scoped.OverviewChunkID) = True
 
 		  Var includedIDs As New Dictionary
 		  For Each idx As Integer In finalIdxs
 		    includedIDs.Value(chunkIDs(idx)) = True
 		  Next
 
-		  // Reranking: a cross-encoder pass over the already-selected candidates
-		  // that reorders by real query-document relevance instead of trusting
-		  // cosine+BM25 alone. Score-threshold and rank-gap "no match" signals
-		  // were tested against 16 real queries and both showed full
-		  // distributional overlap between answerable and unanswerable
-		  // questions — the reranker's relevance_score is the one signal that
-		  // showed real separation (0/8 false positives, 1/8 false negative at
-		  // threshold 0.9). Pure fallback if the server is down or the model
-		  // isn't installed: finalIdxs keeps its existing cosine+BM25 order and
-		  // no score is cached (BuildContext treats a cache miss as "no rerank
-		  // signal available", never injects the no-match marker).
-		  //
-		  // Cached (not a bare field) and keyed by the SAME cacheKey SearchChunks
-		  // uses for mCache: SearchChunks's early cache-hit return skips this
-		  // function entirely on a repeat query, and concurrent ChatPrepThread
-		  // workers can run overlapping searches for different queries — a bare
-		  // module field would go stale or race exactly like mLastEmb/mLastEmbQuery
-		  // would without their own lock (see GetQueryEmbedding).
-		  // Per-chunk-ID rerank score, keyed by chunk ID rather than array
-		  // position — finalIdxs gets reordered by rerank below, and
-		  // neighbour expansion appends more entries afterward, so a
-		  // position-based mapping would drift. BuildContext looks this up
-		  // per RetrievalResult to filter out a chunk that only won its
-		  // scoped pool's internal race without being genuinely relevant
-		  // (see RetrievalResult.RerankScore).
+		  // Reranking: a cross-encoder pass over this pool's own candidates —
+		  // see the historical HybridSearchChunks comment (now on
+		  // SearchOnePool) for why the score-threshold/rank-gap validation
+		  // and TargetPlatformLabel-before-reranking ordering matter; both
+		  // apply unchanged, just scoped to one pool's candidate set instead
+		  // of a merged one.
 		  Var rerankScoreByChunkID As New Dictionary
 		  Var rerankBestScore As Double = -1.0
 		  If finalIdxs.Count > 0 And ModelManager.RerankServerReady Then
-		    // Pre-existing bug, found while diagnosing a Task 7 test failure:
-		    // the target-platform label (TargetPlatformLabel — "[Web-target
-		    // class...]" etc.) was only ever applied when building the final
-		    // RetrievalResult.Text, AFTER reranking already ran — so the
-		    // reranker itself always scored the bare, unlabeled chunk text.
-		    // Confirmed live: "Does Xojo have a native way to show a webpage
-		    // in a desktop app?" reranked WebPage > Overview (a Web-target,
-		    // server-side class) at 0.995 — comfortably above
-		    // kNoMatchThreshold (0.9) — because nothing in the text the
-		    // reranker saw distinguished it from a desktop answer; the model
-		    // then hallucinated a nonexistent "WebBrowser" class rather than
-		    // hitting MatchStatus's no-match gate. Labeling BEFORE reranking
-		    // gives the cross-encoder the same platform signal the model
-		    // gets, so a platform-mismatched chunk can score low enough to
-		    // trip the no-match gate instead of being confidently retrieved.
 		    Var candidateTexts() As String
 		    For Each idx As Integer In finalIdxs
 		      candidateTexts.Add(TargetPlatformLabel(titles(idx)) + texts(idx))
@@ -308,13 +246,7 @@ Protected Module Retrieval
 		      res.Text = TargetPlatformLabel(titles(ai)) + texts(ai)
 		      res.Source = "docs"
 		      res.Score = combined(ai)
-		      // MBS Docset chunks document a paid, third-party plugin (see
-		      // sources(ai), which carries the raw DB source unlike Source
-		      // above) — not part of Xojo itself. BuildContext uses this to
-		      // warn the model when NO native-docs chunk made it into the
-		      // context, so it doesn't imply a third-party-only answer is the
-		      // only option Xojo offers. See BuildContext's kAllThirdPartyNote.
-		      res.IsThirdParty = sources(ai).Left(13) = "MBS Docset > "
+		      res.IsThirdParty = mbsOnly
 		      If rerankScoreByChunkID.HasKey(chunkIDs(ai)) Then
 		        res.RerankScore = rerankScoreByChunkID.Value(chunkIDs(ai)).DoubleValue
 		      End If
@@ -644,36 +576,14 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Sub MergeScopedResult(part As ScopedSearchResult, ByRef chunkIDs() As Integer, ByRef titles() As String, ByRef texts() As String, ByRef sources() As String, ByRef chunkIndexes() As Integer, ByRef prevIDs() As Integer, ByRef nextIDs() As Integer, ByRef combined() As Double, ByRef cosScores() As Double, ByRef finalIdxs() As Integer)
-		  // Appends one ScopedSearch pool's finalIdxs onto the shared,
-		  // merged arrays HybridSearchChunks reranks/expands/groups over —
-		  // remapping each local index to its new position in the merged
-		  // arrays. Call native's pool first, then MBS's, so finalIdxs
-		  // naturally ends up native-first (see HybridSearchChunks's
-		  // ordering comment).
-		  Var offset As Integer = chunkIDs.Count
-		  For i As Integer = 0 To part.ChunkIDs.LastIndex
-		    chunkIDs.Add(part.ChunkIDs(i))
-		    titles.Add(part.Titles(i))
-		    texts.Add(part.Texts(i))
-		    sources.Add(part.Sources(i))
-		    chunkIndexes.Add(part.ChunkIndexes(i))
-		    prevIDs.Add(part.PrevIDs(i))
-		    nextIDs.Add(part.NextIDs(i))
-		    combined.Add(part.Combined(i))
-		    cosScores.Add(part.CosScores(i))
-		  Next
-		  For Each localIdx As Integer In part.FinalIdxs
-		    finalIdxs.Add(offset + localIdx)
-		  Next
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function KeywordSearchChunks(query As String, limit As Integer, db As SQLiteDatabase, activeVersion As String) As RetrievalResult()
-		  // BM25-only fallback — always works, no servers needed. Scoped to the
-		  // active version plus version-independent chunks (docs_version='') and
-		  // MBS docset chunks (docs_version=kMBSDocsVersion).
+		Private Function KeywordSearchChunks(query As String, limit As Integer, db As SQLiteDatabase, activeVersion As String, mbsOnly As Boolean) As RetrievalResult()
+		  // BM25-only fallback — always works, no servers needed. Scoped to
+		  // EITHER native docs (active version plus version-independent
+		  // chunks, docs_version='') OR MBS docset chunks alone, matching
+		  // SearchOnePool/ScopedSearch's per-pool scoping (split-bubble
+		  // redesign, 2026-08-30) — this fallback used to search both
+		  // together in one merged query, back when SearchChunks itself
+		  // searched both pools in one call.
 		  Var results() As RetrievalResult
 		  If db = Nil Then Return results
 
@@ -681,13 +591,27 @@ Protected Module Retrieval
 		  If safe = "" Then Return results
 
 		  Try
-		    Var sql As String = "SELECT c.id, c.title, c.chunk_text, c.prev_id, c.next_id, rank " _
-		      + "FROM chunks_fts " _
-		      + "JOIN chunks c ON c.id = chunks_fts.rowid " _
-		      + "WHERE chunks_fts MATCH ? " _
-		      + "AND (c.docs_version = ? OR c.docs_version = '' OR c.docs_version = ?) " _
-		      + "ORDER BY rank LIMIT ?"
-		    Var rs As RowSet = db.SelectSQL(sql, safe, activeVersion, DBHelper.kMBSDocsVersion, limit)
+		    Var sql As String
+		    If mbsOnly Then
+		      sql = "SELECT c.id, c.title, c.chunk_text, c.prev_id, c.next_id, rank " _
+		        + "FROM chunks_fts " _
+		        + "JOIN chunks c ON c.id = chunks_fts.rowid " _
+		        + "WHERE chunks_fts MATCH ? AND c.docs_version = ? " _
+		        + "ORDER BY rank LIMIT ?"
+		    Else
+		      sql = "SELECT c.id, c.title, c.chunk_text, c.prev_id, c.next_id, rank " _
+		        + "FROM chunks_fts " _
+		        + "JOIN chunks c ON c.id = chunks_fts.rowid " _
+		        + "WHERE chunks_fts MATCH ? " _
+		        + "AND (c.docs_version = ? OR c.docs_version = '') AND c.docs_version <> ? " _
+		        + "ORDER BY rank LIMIT ?"
+		    End If
+		    Var rs As RowSet
+		    If mbsOnly Then
+		      rs = db.SelectSQL(sql, safe, DBHelper.kMBSDocsVersion, limit)
+		    Else
+		      rs = db.SelectSQL(sql, safe, activeVersion, DBHelper.kMBSDocsVersion, limit)
+		    End If
 
 		    Var seenIds() As Integer
 		    While Not rs.AfterLastRow
@@ -697,6 +621,7 @@ Protected Module Retrieval
 		      r.Title = rs.Column("title").StringValue
 		      r.Source = "docs"
 		      r.Score = rs.Column("rank").DoubleValue
+		      r.IsThirdParty = mbsOnly
 		      results.Add(r)
 		      seenIds.Add(chunkId)
 
@@ -710,6 +635,7 @@ Protected Module Retrieval
 		          rp.Source = "docs"
 		          rp.Score = r.Score - 0.01
 		          rp.Title = ""
+		          rp.IsThirdParty = mbsOnly
 		          results.Add(rp)
 		          seenIds.Add(prevId)
 		        End If
@@ -725,6 +651,7 @@ Protected Module Retrieval
 		          rn.Source = "docs"
 		          rn.Score = r.Score - 0.01
 		          rn.Title = ""
+		          rn.IsThirdParty = mbsOnly
 		          results.Add(rn)
 		          seenIds.Add(nextId)
 		        End If
@@ -946,15 +873,26 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function GetCachedRerankScore(query As String, limit As Integer) As Double
-		  // Reads the best rerank score HybridSearchChunks stashed for this exact
-		  // SearchChunks call (same cacheKey formula, same lock). -1 means "no
-		  // signal" — either the query hasn't been searched via SearchChunks yet
-		  // this call (BuildContext always searches first, so this only happens
-		  // if SearchChunks returned early some other way), the reranker never
-		  // ran (server down, keyword-only fallback), or a ClearCache landed
-		  // between the search and this read.
-		  Var cacheKey As String = DBHelper.GetActiveVersion + "|" + query + "|" + limit.ToString
+		Private Function GetCachedRerankScore(query As String, pool As String, limit As Integer) As Double
+		  // Reads the best rerank score SearchOnePool stashed for this exact
+		  // SearchChunks call — MUST use the exact same cacheKey formula (now
+		  // including pool, not just activeVersion|query|limit) or this always
+		  // misses and silently returns -1 ("no signal"), which MatchStatusFor
+		  // Pool then reports as kStatusUnavailable instead of actually
+		  // gating on the score. Confirmed live (2026-08-30) as a real,
+		  // pre-existing bug: this key fell out of sync with SearchChunks's
+		  // own key the moment a "pool"/"scope" segment was added there
+		  // (first for docs_search_scope, now for the split-bubble pool
+		  // dimension) without updating this second, independent formula —
+		  // every scoped/pooled query silently bypassed the no-match gate
+		  // until this fix. -1 still legitimately means "no signal" for the
+		  // other reasons below: the query hasn't been searched via
+		  // SearchChunks yet this call (BuildUserFacingAnswerForPool always
+		  // searches first, so this only happens if SearchChunks returned
+		  // early some other way), the reranker never ran (server down,
+		  // keyword-only fallback), or a ClearCache landed between the
+		  // search and this read.
+		  Var cacheKey As String = DBHelper.GetActiveVersion + "|" + pool + "|" + query + "|" + limit.ToString
 		  mCacheLock.Enter
 		  Var result As Double = -1.0
 		  If mRerankScoreCache <> Nil And mRerankScoreCache.HasKey(cacheKey) Then
@@ -1041,62 +979,21 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function AllThirdPartyNote() As String
-		  // A plain method, not a #tag Constant — CLAUDE.md documents that a
-		  // literal comma inside a Constant's default value silently
-		  // truncates the string at the project-file level in .xojo_code
-		  // too, with no known escape fix (unlike .xojo_window's \x2C). An
-		  // ordinary string literal built via concatenation inside a method
-		  // body doesn't have this bug (see BaseInstructions/
-		  // ClosingReminders, which already do this for long prompt text).
+		Function MatchStatusForPool(query As String, pool As String, conn As SQLiteDatabase = Nil) As String
+		  // Split-bubble redesign (reactive-coalescing-thimble plan,
+		  // Decision 2, 2026-08-30): replaces the old single merged
+		  // MatchStatus, which gated the WHOLE turn on ONE best score
+		  // across both pools combined — a query where native scored 0.2
+		  // and MBS scored 0.95 let the entire turn through on MBS's
+		  // strength alone, relying on GroupResults' after-the-fact
+		  // kCrossPoolGapThreshold filter (now retired) to hide native's
+		  // weak result. This pool-scoped version gates each pool
+		  // independently and correctly at the source: pool="native" here
+		  // self-rejects at 0.2 with zero need to know MBS's score, which
+		  // the split-bubble architecture structurally can't have anyway
+		  // (whichever pool finishes first can't see the other's score
+		  // yet).
 		  //
-		  // Public (not Private): XDOXSession.PrepareRequest calls this
-		  // directly to build its OWN copy of this text to append after
-		  // ClosingReminders — see BuildContext's comment on why the copy
-		  // embedded in the context string itself is stripped back out and
-		  // never actually sent to the model from there.
-		  Return "IMPORTANT: every result below is THIRD-PARTY (MBS plugin) documentation — " _
-		    + "none of these results are part of Xojo itself. You do NOT know whether Xojo " _
-		    + "has a native (built-in) way to do this — the search did not find one, but " _
-		    + "that does NOT mean one doesn't exist; it may simply not have been named in " _
-		    + "this conversation. This is a hard rule: do NOT say 'Xojo does not have a " _
-		    + "native way' or similar, and do NOT open a reply to 'can I do this with a " _
-		    + "native control' with 'No' — instead say you found third-party (MBS) " _
-		    + "documentation for this, and that you cannot confirm whether a native " _
-		    + "alternative exists unless the user names a specific native class to check."
-		End Function
-	#tag EndMethod
-
-	#tag Constant, Name = kAllThirdPartyMarker, Type = String, Dynamic = False, Default = \"\x5B__ALL_THIRD_PARTY__\x5D", Scope = Public
-	#tag EndConstant
-
-	#tag Method, Flags = &h0
-		Function BothSourcesNote() As String
-		  // See kAllThirdPartyMarker/AllThirdPartyNote for why this is a
-		  // plain method (comma-in-Constant truncation) and why
-		  // XDOXSession.PrepareRequest appends its own copy of this text
-		  // after ClosingReminders instead of trusting the marker embedded
-		  // in the context string to do anything on its own.
-		  //
-		  // Public: XDOXSession.PrepareRequest calls this directly.
-		  Return "IMPORTANT: this context contains BOTH a native Xojo (built-in) result AND a " _
-		    + "third-party (MBS plugin) result that both address the user's question — see the " _
-		    + "[Native Xojo Docs] and [Third-Party (MBS Plugin) Docs] sections above. This is a " _
-		    + "hard rule: you do NOT get to pick a winner between them. You cannot know the " _
-		    + "user's license situation, target platforms, or feature needs, so present BOTH as " _
-		    + "real options — native first, then the MBS alternative — with a short, neutral " _
-		    + "note on the tradeoff (e.g. native needs no extra dependency or license; the MBS " _
-		    + "class may offer more features or broader platform support) and let the user choose. " _
-		    + "Do NOT lead with only one of them and mention the other as an afterthought, and do " _
-		    + "NOT tell the user which one to use — describe both, then stop."
-		End Function
-	#tag EndMethod
-
-	#tag Constant, Name = kBothSourcesMarker, Type = String, Dynamic = False, Default = \"\x5B__BOTH_SOURCES__\x5D", Scope = Public
-	#tag EndConstant
-
-	#tag Method, Flags = &h0
-		Function MatchStatus(query As String, conn As SQLiteDatabase = Nil) As String
 		  // Hard gate, not advice: a system-prompt marker telling the model "no
 		  // match, say so honestly" was implemented first and confirmed live to
 		  // NOT reliably stop the model from writing fabricated example code
@@ -1104,12 +1001,11 @@ Protected Module Retrieval
 		  // model treats "admit uncertainty" and "don't then speculate" as
 		  // separable instincts, and satisfying the first doesn't suppress the
 		  // second. Converting the reranker's signal into CONTROL FLOW (this
-		  // status gates whether XDOXSession ever opens a generation request at
-		  // all) is the fix: the model cannot fabricate code in a turn it never
-		  // receives. Call this before SearchChunks/BuildContext — it's cheap
-		  // (SearchChunks caches, so the real search here is the same one
-		  // BuildContext performs), and the caller only needs to build/send a
-		  // full request on kStatusSupported.
+		  // status gates whether XDOXSession ever renders a bubble for this
+		  // pool at all) is the fix: the model cannot fabricate code in a turn
+		  // it never receives — moot now that no chat-completion model runs at
+		  // all, but the control-flow gate still does the same job of refusing
+		  // to render a weak match as if it were a real answer.
 		  //
 		  // Returns kStatusSupported, kStatusNoMatch, or kStatusUnavailable
 		  // (reranker down/not installed — falls back to ordinary cosine+BM25
@@ -1119,12 +1015,12 @@ Protected Module Retrieval
 		  If pinned.Count > 0 Then Return kStatusSupported // curated pin is trusted deterministically
 
 		  Var chunkSearchLimit As Integer = ChunkSearchLimit(query)
-		  Call SearchChunks(query, chunkSearchLimit, conn) // populates mRerankScoreCache as a side effect
-		  Var rerankBestScore As Double = GetCachedRerankScore(query, chunkSearchLimit)
+		  Call SearchChunks(query, pool, chunkSearchLimit, conn) // populates mRerankScoreCache as a side effect
+		  Var rerankBestScore As Double = GetCachedRerankScore(query, pool, chunkSearchLimit)
 
 		  If rerankBestScore < 0.0 Then Return kStatusUnavailable
 		  If rerankBestScore < Reranker.kNoMatchThreshold Then
-		    App.AppendDebugLog("Retrieval.MatchStatus: NoMatch for """ + query + """ (best rerank score " + Format(rerankBestScore, "0.000") + ")" + EndOfLine)
+		    App.AppendDebugLog("Retrieval.MatchStatusForPool: NoMatch for pool """ + pool + """, query """ + query + """ (best rerank score " + Format(rerankBestScore, "0.000") + ")" + EndOfLine)
 		    Return kStatusNoMatch
 		  End If
 		  Return kStatusSupported
@@ -1132,134 +1028,36 @@ Protected Module Retrieval
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Function BuildContext(query As String, conn As SQLiteDatabase = Nil) As String
-		  // Docs only — notes are injected into the user message instead
-		  // (BuildNotesPreamble). A [Your Notes] section in the system context
-		  // gets ignored by small models once the docs context is large.
-		  // Pinned legacy→modern mapping chunks go first, then search hits
-		  // that aren't the same chunk.
-		  // conn lets a worker thread (ChatPrepThread) pass its OWN connection so
-		  // reads never share the main-thread handle. Caller is expected to have
-		  // already checked MatchStatus <> kStatusNoMatch — this function no
-		  // longer gates on the reranker score itself (see MatchStatus).
-		  Var nativeResults() As RetrievalResult
-		  Var mbsResults() As RetrievalResult
-		  Var allThirdParty As Boolean
-		  Var bothFound As Boolean
-		  GroupResults(query, conn, nativeResults, mbsResults, allThirdParty, bothFound)
-		  If nativeResults.Count = 0 And mbsResults.Count = 0 Then Return ""
-
-		  // Short markers, not the full note text, are embedded here — the
-		  // model largely ignores instructions placed BEFORE a large Context
-		  // block (see XDOXSession.ClosingReminders' "burger test" comment),
-		  // confirmed live: putting the full AllThirdPartyNote() text at the
-		  // top of the docs context did NOT stop the model from opening a
-		  // reply with "No, not with a native Xojo control." XDOXSession.
-		  // PrepareRequest strips these markers back out of context and
-		  // appends the actual note text to sysPrompt AFTER ClosingReminders
-		  // instead, where instructions actually stick.
-		  Var sb As String = ""
-		  If allThirdParty Then
-		    sb = sb + kAllThirdPartyMarker + EndOfLine + EndOfLine
-		  ElseIf bothFound Then
-		    sb = sb + kBothSourcesMarker + EndOfLine + EndOfLine
-		  End If
-
-		  If nativeResults.Count > 0 Then
-		    sb = sb + "[Native Xojo Docs]" + EndOfLine
-		    For di As Integer = 0 To nativeResults.Count - 1
-		      If di > 0 Then sb = sb + EndOfLine + "---" + EndOfLine + EndOfLine
-		      sb = sb + nativeResults(di).Text
-		    Next
-		  End If
-		  If mbsResults.Count > 0 Then
-		    If nativeResults.Count > 0 Then sb = sb + EndOfLine + EndOfLine
-		    sb = sb + "[Third-Party (MBS Plugin) Docs]" + EndOfLine
-		    For di As Integer = 0 To mbsResults.Count - 1
-		      If di > 0 Then sb = sb + EndOfLine + "---" + EndOfLine + EndOfLine
-		      sb = sb + mbsResults(di).Text
-		    Next
-		  End If
-
-		  Return sb
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function BuildUserFacingAnswer(query As String, conn As SQLiteDatabase = Nil) As String
-		  // The radical fix for Task 2's fabrication problem (see the
-		  // retrieval-quality-backlog memory, 2026-08-29): a 12-query test
-		  // battery found retrieval identifies the right class ~92% of the
-		  // time but only ~25% of chat-model-GENERATED replies had fully
-		  // correct code — and a hard prompt rule telling the model to
-		  // never write its own code, even backed by mechanical post-hoc
-		  // stripping of anything it wrote anyway, was confirmed live NOT
-		  // to give the user a trustworthy answer: the model still
-		  // fabricated in PROSE too (invented method names in running
-		  // text, not just code blocks), which stripping code alone never
-		  // addressed. The user's call (2026-08-29): the chat model must
-		  // not compose ANY part of the answer — not code, not prose. Its
-		  // only remaining job, upstream of this function, is turning the
-		  // conversation into a good retrieval query (RetrievalQuery/
-		  // MatchStatus) — this function then renders the ACTUAL matched
-		  // documentation text directly, verbatim, as the answer.
-		  Var nativeResults() As RetrievalResult
-		  Var mbsResults() As RetrievalResult
-		  Var allThirdParty As Boolean
-		  Var bothFound As Boolean
-		  GroupResults(query, conn, nativeResults, mbsResults, allThirdParty, bothFound)
-		  If nativeResults.Count = 0 And mbsResults.Count = 0 Then Return ""
-
-		  Var sb As String = ""
-		  If nativeResults.Count > 0 Then
-		    For di As Integer = 0 To nativeResults.Count - 1
-		      If di > 0 Then sb = sb + EndOfLine + EndOfLine
-		      sb = sb + FormatResultForDisplay(nativeResults(di))
-		    Next
-		  End If
-		  If mbsResults.Count > 0 Then
-		    If nativeResults.Count > 0 Then
-		      sb = sb + EndOfLine + EndOfLine + "### From the MBS plugin docs" + EndOfLine + EndOfLine
-		    End If
-		    For di As Integer = 0 To mbsResults.Count - 1
-		      If di > 0 Then sb = sb + EndOfLine + EndOfLine
-		      sb = sb + FormatResultForDisplay(mbsResults(di))
-		    Next
-		  End If
-
-		  If bothFound Then
-		    sb = sb + EndOfLine + EndOfLine + "_Both a native Xojo option and an MBS plugin option exist " _
-		      + "above — which fits better depends on your project (license, target platforms, features " _
-		      + "needed), so both are shown rather than picking one for you._"
-		  ElseIf allThirdParty Then
-		    sb = sb + EndOfLine + EndOfLine + "_No native Xojo documentation was found for this — the " _
-		      + "MBS plugin result above is shown because it's the closest match, but that doesn't " _
-		      + "confirm whether a native alternative exists or not._"
-		  End If
-
-		  Return sb
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function FormatResultForDisplay(r As RetrievalResult) As String
-		  // r.Text already carries any TargetPlatformLabel prefix (see
-		  // HybridSearchChunks) and RSTParser's kCodeFenceOpen/Close marks
-		  // for native docs — shown as-is, verbatim, no rewriting. A
-		  // markdown heading from the chunk's own title gives each result
-		  // a visual anchor when several are shown together.
-		  Return "#### " + r.Title + EndOfLine + EndOfLine + r.Text
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub GroupResults(query As String, conn As SQLiteDatabase, ByRef nativeResults() As RetrievalResult, ByRef mbsResults() As RetrievalResult, ByRef allThirdParty As Boolean, ByRef bothFound As Boolean)
-		  // Shared by BuildContext (legacy model-prompt path, kept for any
-		  // future use of chat generation) and BuildUserFacingAnswer (the
-		  // current path — see its comment) — same split/filter logic
-		  // either way, just rendered differently by each caller.
+		Function BuildUserFacingAnswerForPool(query As String, pool As String, conn As SQLiteDatabase = Nil) As String
+		  // Split-bubble redesign (Decision 2+3, 2026-08-30): replaces the
+		  // old BuildUserFacingAnswer + GroupResults pair. GroupResults'
+		  // kCrossPoolGapThreshold filter — added same day to stop a
+		  // generic "What is Xojo?" native chunk (rerank 0.497) from being
+		  // shown as a real answer when MBS had a much stronger match
+		  // (0.986) for the same query — is retired here, not reworked to
+		  // run speculatively: MatchStatusForPool's per-pool gate fixes the
+		  // SAME bug at the layer that doesn't require cross-pool
+		  // knowledge (native's own 0.497 < kNoMatchThreshold 0.9 self-
+		  // rejects, independent of MBS's score entirely), which the
+		  // split-bubble architecture needs anyway since whichever pool
+		  // renders first structurally can't know the other's score yet.
+		  //
+		  // The allThirdParty/bothFound trailer note ("no native
+		  // documentation was found" / "both a native and MBS option
+		  // exist") is ALSO retired from this function — it was a claim
+		  // about BOTH pools having been searched, which this per-pool
+		  // function has no way to know on its own. It becomes a separate,
+		  // later-arriving system message once both pools' completion is
+		  // known (XDOXSession, once Stage 3 wires it) rather than being
+		  // computed or attached here.
+		  //
+		  // The chat-completion model composes NO part of this answer —
+		  // not code, not prose (see the retrieval-quality-backlog memory,
+		  // 2026-08-29, for the full history of why) — this function
+		  // renders the ACTUAL matched documentation text directly,
+		  // verbatim, as the answer.
 		  Var pinned() As RetrievalResult = PinnedMigrationResults(query, conn)
-		  Var docResults() As RetrievalResult = SearchChunks(query, ChunkSearchLimit(query), conn)
+		  Var docResults() As RetrievalResult = SearchChunks(query, pool, ChunkSearchLimit(query), conn)
 
 		  Var results() As RetrievalResult
 		  For Each p As RetrievalResult In pinned
@@ -1272,104 +1070,50 @@ Protected Module Retrieval
 		    Next
 		    If Not dup Then results.Add(d)
 		  Next
-		  If results.Count = 0 Then Return
+		  If results.Count = 0 Then Return ""
 
-		  // Task 7: split into native and third-party (MBS) groups so the
-		  // context can label each block explicitly instead of presenting
-		  // one undifferentiated [Xojo Docs] list — HybridSearchChunks now
-		  // guarantees native results come first (see its ordering
-		  // comment), so this split preserves that order rather than
-		  // re-sorting anything.
+		  // A result is dropped here if its OWN rerank score is below
+		  // kMinRelevanceScore — found live (pre-split-bubble): a pool's
+		  // ScopedSearch always fills its result budget with whatever
+		  // scored best in that pool, even when the best available is
+		  // still noise (e.g. a generic tutorial chunk for a question with
+		  // no real answer in that pool). IsGuaranteed chunks (a matched
+		  // class's own Overview page, force-included by ScopedSearch
+		  // specifically so the model can confirm the class exists) are
+		  // exempt — see RetrievalResult.IsGuaranteed's comment.
 		  //
-		  // A result is dropped here (not added to either group) if its
-		  // OWN rerank score is below kMinRelevanceScore — found live:
-		  // ScopedSearch always fills its half of the result budget with
-		  // whatever scored best in its pool, even when the best available
-		  // is still noise (e.g. a generic "Web QuickStart > Adding code"
-		  // tutorial chunk for a QR-code question, because no real native
-		  // QR answer exists). The reranker correctly scored that chunk
-		  // near zero, but nothing previously acted on a single chunk's own
-		  // low score — only on rerankBestScore (the search's best score
-		  // overall, used for MatchStatus's no-match gate), which stays
-		  // high because the OTHER pool (MBS) has a real answer. Without
-		  // this filter, allThirdParty below could never fire once a
-		  // native chunk existed at all, however weak — a regression from
-		  // Task 6's original guarantee. RerankScore < 0 (reranking didn't
-		  // run — pinned results, or the reranker server is down/missing)
-		  // is NOT filtered; only a result that WAS scored and scored low
-		  // is dropped, so this degrades to "no filtering" gracefully
-		  // rather than hiding results when the signal isn't available.
-		  // "Does this native chunk count as a real native alternative for
-		  // Task 7's allThirdParty/bothFound decision" is separate from
-		  // "does it belong in the results/context at all" — a chunk tagged
-		  // for a DIFFERENT platform than the user is asking about (see
-		  // TargetPlatformLabel) still gets shown to the model (Task 5's
-		  // hard rule needs it there to correctly say "no desktop-native
-		  // class, only a Web-target one"), but must NOT count as "native
-		  // was found" here. Found live: a Web-target WebPage chunk scored
-		  // 0.68 (genuinely relevant to "show a webpage", just wrong
-		  // platform) — well above kMinRelevanceScore, so it survived the
-		  // filter above and set bothFound, whose BothSourcesNote then told
-		  // the model to "present both as real alternatives, native first"
-		  // — directly contradicting Task 5's rule that the answer must
-		  // open with "No" when the only supporting class is wrong-platform.
-		  // Two hard rules actively fighting each other, same failure shape
-		  // as the already-documented Task 5/Task 6 interaction bug.
+		  // Platform filtering: a native chunk whose own platform label
+		  // doesn't match what the user is asking about is dropped, unless
+		  // the user's OWN query explicitly names that other platform (a
+		  // Web/iOS/Android/Console result then genuinely IS the right
+		  // answer).
 		  Var wantsNonDesktop As Boolean = QueryNamesNonDesktopPlatform(query)
+		  Var filtered() As RetrievalResult
 		  For Each r As RetrievalResult In results
-		    // IsGuaranteed chunks (a matched class's own Overview page,
-		    // force-included by ScopedSearch specifically so the model can
-		    // confirm the class exists) are exempt from this filter — see
-		    // RetrievalResult.IsGuaranteed's comment. Without this
-		    // exemption, a terse Overview chunk reranking below the floor
-		    // against a specific query would be silently dropped here,
-		    // undoing the guarantee ScopedSearch just fought to keep.
 		    If Not r.IsGuaranteed And r.RerankScore >= 0.0 And r.RerankScore < kMinRelevanceScore Then Continue
-		    If r.IsThirdParty Then
-		      mbsResults.Add(r)
-		    Else
-		      nativeResults.Add(r)
-		    End If
+		    If pool = "native" And Not wantsNonDesktop And TargetPlatformLabel(r.Title) <> "" Then Continue
+		    filtered.Add(r)
 		  Next
+		  If filtered.Count = 0 Then Return ""
 
-		  // "No native chunk found at all" is now a deterministic fact about
-		  // a dedicated, separately-scoped native search (see
-		  // Retrieval.ScopedSearch) — not, as before Task 7, an artifact of
-		  // native chunks having lost a shared cosine/BM25 race against MBS
-		  // chunks (a stray word-boundary class match from folded-in
-		  // conversation history could flip that outcome unpredictably; see
-		  // the retrieval-quality-backlog memory's Task 6/Task 5 interaction
-		  // bug). There is no scalable way to curate "MBS class X's native
-		  // equivalent is Y" — MBS's catalog is huge, much of it built
-		  // precisely because Xojo has NO native equivalent, so guessing one
-		  // exists would trade one hallucination for another. The honest fix
-		  // is to make the gap explicit instead of guessing either way.
-		  //
-		  // "Found" here means "found a genuine, matching-platform native
-		  // result" — a native chunk whose own platform label doesn't match
-		  // what the user is asking about doesn't count, unless the user's
-		  // OWN query explicitly names that other platform (in which case a
-		  // Web/iOS/Console/Android result genuinely IS the right answer).
-		  Var nativeFoundCount As Integer = 0
-		  If wantsNonDesktop Then
-		    nativeFoundCount = nativeResults.Count
-		  Else
-		    For Each r As RetrievalResult In nativeResults
-		      If TargetPlatformLabel(r.Title) = "" Then nativeFoundCount = nativeFoundCount + 1
-		    Next
-		  End If
-		  allThirdParty = (nativeFoundCount = 0 And mbsResults.Count > 0)
+		  Var sb As String = ""
+		  For di As Integer = 0 To filtered.LastIndex
+		    If di > 0 Then sb = sb + EndOfLine + EndOfLine
+		    sb = sb + FormatResultForDisplay(filtered(di))
+		  Next
+		  Return sb
+		End Function
+	#tag EndMethod
 
-		  // Both sides found something comparable — the case Task 7 exists
-		  // for. The model cannot know which of native or MBS is "better"
-		  // for this user's project (license cost, target platforms,
-		  // feature needs are all things only the user knows), so the
-		  // correct behavior is to present both as real alternatives and
-		  // let the user choose, not silently pick a leader. See
-		  // BothSourcesNote — same "short marker here, real instruction
-		  // after ClosingReminders" pattern as kAllThirdPartyMarker below.
-		  bothFound = (nativeFoundCount > 0 And mbsResults.Count > 0)
-		End Sub
+	#tag Method, Flags = &h21
+		Private Function FormatResultForDisplay(r As RetrievalResult) As String
+		  // r.Text already carries any TargetPlatformLabel prefix (see
+		  // SearchOnePool) and RSTParser's kCodeFenceOpen/Close marks
+		  // for native docs — shown as-is, verbatim, no rewriting. A
+		  // markdown heading from the chunk's own title gives each result
+		  // a visual anchor when several are shown together.
+		  Return "#### " + r.Title + EndOfLine + EndOfLine + r.Text
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
@@ -1737,22 +1481,6 @@ Protected Module Retrieval
 		  Return False
 		End Function
 	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Sub SelfTest()
-		  Var query As String = "FolderItem"
-		  App.AppendDebugLog("Retrieval.SelfTest: querying for '" + query + "'" + EndOfLine)
-		  Var ctx As String = BuildContext(query)
-		  If ctx = "" Then
-		    App.AppendDebugLog("Retrieval.SelfTest: no results" + EndOfLine)
-		  Else
-		    Var preview As String = ctx
-		    If preview.Length > 500 Then preview = preview.Left(500) + "..."
-		    App.AppendDebugLog("Retrieval.SelfTest: context (" + ctx.Length.ToString + " chars):" + EndOfLine + preview + EndOfLine)
-		  End If
-		End Sub
-	#tag EndMethod
-
 
 	#tag Property, Flags = &h21
 		Private mCache As Dictionary

@@ -1,8 +1,15 @@
 // Chat message rendering — user bubbles, assistant bubbles, error states.
 // Depends on: marked (global), sanitizeHTML, postToXojo, addSaveNoteButton, lastUserMessage.
 
-let currentAssistantBubble = null;
-let currentRawText = '';
+// Split-bubble redesign (reactive-coalescing-thimble plan, 2026-08-30): up to
+// two independent assistant bubbles can be in flight for one turn — one per
+// pool ("native"/"mbs") — each arriving whenever ITS OWN search completes,
+// not in lockstep. pendingBubbles replaces the old single currentAssistantBubble/
+// currentRawText module-level pair (which could only track one in-flight
+// bubble at a time) with one entry per pool. Finalizing one pool's bubble no
+// longer flips isGenerating/setSendState — that's main.js's onTurnDone,
+// called only once ALL expected pools have completed (see main.js).
+let pendingBubbles = {}; // pool -> { bubble, rawText }
 
 function showUserMessage(text) {
   const div = document.createElement('div');
@@ -12,40 +19,50 @@ function showUserMessage(text) {
   scrollToBottom();
 }
 
-function renderReply(text) {
-  currentRawText = text;
-  removeThinkingIndicator();
-  currentAssistantBubble = document.createElement('div');
-  currentAssistantBubble.className = 'message assistant';
-  currentAssistantBubble.innerHTML = sanitizeHTML(marked.parse(text));
-  chatArea().appendChild(currentAssistantBubble);
+function renderReplyForPool(pool, text) {
+  removeSearchStatus(pool);
+  const bubble = document.createElement('div');
+  bubble.className = 'message assistant';
+  bubble.innerHTML = sanitizeHTML(marked.parse(text));
+  // Insert BEFORE the status container, not just appendChild — the status
+  // container (still showing the OTHER pool's "Searching…" row, if any) is
+  // created once up front and must stay pinned at the bottom as "what's
+  // still coming," never sandwiched between two bubbles. Found live
+  // (2026-08-30): appendChild alone put a later-arriving bubble AFTER the
+  // still-visible status container, so a fast MBS bubble rendered ABOVE the
+  // native pool's still-pending status row instead of below it.
+  const container = document.getElementById('searchStatusContainer');
+  if (container) {
+    chatArea().insertBefore(bubble, container);
+  } else {
+    chatArea().appendChild(bubble);
+  }
+  pendingBubbles[pool] = { bubble: bubble, rawText: text };
   scrollToBottom();
 }
 
-function showCannedResponse(text) {
+function showCannedResponseForPool(pool, text) {
   // XDOXSession no longer calls the chat-completion model at all
-  // (2026-08-29 redesign) — every reply is fully computed on the Xojo
-  // side (either matched documentation text or the no-match message)
-  // before it ever reaches here, so render+finalize always happen as one
-  // atomic call. Kept as a single call (not renderReply() then
-  // finalizeMessage() as two separate EvaluateJavaScript round-trips)
-  // because two separate calls with no real time between them were
-  // observed live to race in the WebView's JS queue, cutting the
-  // rendered bubble off mid-word.
-  renderReply(text);
-  finalizeMessage();
+  // (2026-08-29 redesign) — every reply, matched-documentation or
+  // no-match alike, renders through this single atomic JS call rather
+  // than token-by-token streaming. render+finalize happen as one call:
+  // the original race this atomicity guards against was two calls for
+  // the SAME bubble landing back-to-back in the WebView's JS queue with
+  // no real time between them (pre-split-bubble era) — a different
+  // pool's call, arriving independently whenever ITS OWN worker
+  // finishes (seconds apart, not same-tick), targets its OWN bubble via
+  // pendingBubbles and carries no analogous risk.
+  renderReplyForPool(pool, text);
+  finalizeMessageForPool(pool);
 }
 
-function finalizeMessage() {
-  // Always clear the thinking spinner — guards an edge case where no
-  // bubble was ever created (e.g. an early stop during request prep).
-  removeThinkingIndicator();
-  if (!currentAssistantBubble) return;
+function finalizeMessageForPool(pool) {
+  const pending = pendingBubbles[pool];
+  if (!pending) return; // guards an edge case where no bubble was ever created
+  delete pendingBubbles[pool];
 
-  const bubble = currentAssistantBubble;
-  const rawText = currentRawText;
-  currentAssistantBubble = null;
-  currentRawText = '';
+  const bubble = pending.bubble;
+  const rawText = pending.rawText;
 
   // Mark long bubbles as collapsible but start expanded — user collapses manually.
   if (bubble.scrollHeight > 320) {
@@ -88,6 +105,34 @@ function finalizeMessage() {
   scrollToBottom();
 }
 
+const NO_MATCH_TEXT = {
+  native: 'No native Xojo documentation was found for this.',
+  mbs: 'No MBS plugin documentation was found for this.'
+};
+
+function showNoMatchForPool(pool) {
+  // This pool's own search came up empty — rendered IMMEDIATELY (right
+  // where its "Searching…" status row was, already cleared by the
+  // OnPoolDone call Xojo makes just before this one), not held back until
+  // the whole turn finishes. Same assistant-bubble styling as a real reply
+  // (a plain italic line was tried first and looked inconsistent sitting
+  // next to an actual bubble — feedback live, 2026-08-30) — not tied to
+  // pendingBubbles since there's no copy/save-as-note action for it.
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  div.textContent = NO_MATCH_TEXT[pool] || 'No documentation was found for this.';
+  // Insert before the status container so the OTHER pool's still-pending
+  // "Searching…" row stays pinned at the bottom — same reasoning as
+  // renderReplyForPool's insertBefore.
+  const container = document.getElementById('searchStatusContainer');
+  if (container) {
+    chatArea().insertBefore(div, container);
+  } else {
+    chatArea().appendChild(div);
+  }
+  scrollToBottom();
+}
+
 function showThinkingIndicator() {
   removeThinkingIndicator();
   const el = document.createElement('div');
@@ -107,10 +152,57 @@ function removeThinkingIndicator() {
   if (el) el.remove();
 }
 
-function showError(message) {
+// Per-pool "Searching Xojo docs…" / "Searching MBS docs…" status, shown in
+// the same thinking-indicator slot the old single spinner used — cleared
+// per-pool as that pool's own bubble arrives (removeSearchStatus, called
+// from renderReplyForPool), not all at once. See main.js's sendMessage for
+// where these are created (it knows which pools were actually searched).
+function showSearchStatus(statuses) {
+  // statuses: array of { pool, text }
   removeThinkingIndicator();
-  currentAssistantBubble = null;
-  currentRawText = '';
+  removeAllSearchStatus();
+  const container = document.createElement('div');
+  container.className = 'thinking-indicator search-status';
+  container.id = 'searchStatusContainer';
+  statuses.forEach(s => {
+    const row = document.createElement('div');
+    row.className = 'search-status-row';
+    row.id = 'searchStatus-' + s.pool;
+
+    const dots = document.createElement('span');
+    dots.className = 'search-status-dots';
+    for (let i = 0; i < 3; i++) {
+      const dot = document.createElement('span');
+      dot.className = 'thinking-dot';
+      dots.appendChild(dot);
+    }
+    row.appendChild(dots);
+
+    const label = document.createElement('span');
+    label.textContent = s.text;
+    row.appendChild(label);
+
+    container.appendChild(row);
+  });
+  chatArea().appendChild(container);
+  scrollToBottom();
+}
+
+function removeSearchStatus(pool) {
+  const row = document.getElementById('searchStatus-' + pool);
+  if (row) row.remove();
+  const container = document.getElementById('searchStatusContainer');
+  if (container && !container.hasChildNodes()) container.remove();
+}
+
+function removeAllSearchStatus() {
+  const container = document.getElementById('searchStatusContainer');
+  if (container) container.remove();
+}
+
+function showError(pool, message) {
+  removeSearchStatus(pool);
+  delete pendingBubbles[pool];
   const div = document.createElement('div');
   div.className = 'message assistant';
   div.style.borderColor = 'var(--color-danger)';

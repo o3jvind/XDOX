@@ -68,8 +68,12 @@
       <span class="status-spacer"></span>
       <span class="index-status" id="indexStatus"></span>
       <span class="semantic-status" id="semanticStatus" title="Search quality"></span>
-      <button class="backend-status" id="backendStatus" onclick="openModelOverlay()" title="Model settings">Starting…</button>
       <select class="status-select" id="versionSelect" onchange="selectDocsVersion(this.value)" title="Xojo documentation version" style="display:none;"></select>
+      <select class="status-select" id="docsScopeSelect" onchange="setDocsSearchScope(this.value)" title="Which documentation to search">
+        <option value="all" selected>Xojo + MBS docs</option>
+        <option value="native">Xojo docs only</option>
+        <option value="mbs">MBS docs only</option>
+      </select>
       <select class="status-select" id="themeSelect" onchange="postToXojo('setTheme', {theme: this.value}); applyTheme(this.value)" title="Color theme">
         <option value="system" selected>System theme</option>
         <option value="dark">Dark</option>
@@ -83,18 +87,8 @@
 
 </div>
 
-<!-- ── Model picker overlay ─────────────── -->
-<div class="model-overlay" id="modelOverlay" style="display:none;">
-  <div class="model-dialog">
-    <div class="model-dialog-header">
-      <span class="model-dialog-title">Choose a model</span>
-      <button class="model-dialog-close" id="modelOverlayClose" onclick="closeModelOverlay()" title="Close">&#x2715;</button>
-    </div>
-    <p class="model-dialog-intro">XDOX runs a local AI model on your Mac. Nothing leaves your machine.</p>
-    <p class="model-dialog-embed-note" id="embedNote" style="display:none;"></p>
-    <div class="model-list" id="modelList"></div>
-  </div>
-</div>
+<!-- ── First-run model-download disclosure banner ─────────────── -->
+<div class="embed-banner" id="embedBanner" style="display:none;"></div>
 
 <div class="toast" id="toast"></div>
 

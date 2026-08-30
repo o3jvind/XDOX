@@ -3,57 +3,37 @@ Protected Module ModelManager
 	#tag Method, Flags = &h0
 		Sub AutoStart()
 		  // Called from ChatView's pageReady handler — the WebView must be live
-		  // before any receiveBackendState() call can land.
+		  // before any receiveModelStatus()/receiveDownloadProgress() call can
+		  // land.
+		  //
+		  // XDOX used to generate chat replies with a local LLM (qwen2.5-coder
+		  // et al, port 8091) selected via a model picker. Removed 2026-08-30:
+		  // XDOXSession stopped calling that model at all on 2026-08-29 (see
+		  // its PrepareRequest comment) — replies render matched documentation
+		  // text directly instead of generating one. Two narrower follow-up
+		  // uses were deliberately explored and rejected before removal, not
+		  // just assumed unnecessary: (1) query-rewriting for retrieval (e.g.
+		  // folding a follow-up like "how about android?" into a standalone
+		  // search query) — measured directly against the DB across 3 repros,
+		  // mixed/no real improvement over plain history-concatenation, same
+		  // conclusion as an earlier 2026-08-16 attempt; (2) asking ONE narrow
+		  // clarifying question back to the user when retrieval is ambiguous
+		  // or empty, explicitly told not to state any Xojo fact — worked
+		  // cleanly for pure platform-choice questions, but a harder repro (a
+		  // query touching a deprecated API) leaked an unrequested factual
+		  // claim in 3 of 5 runs despite the explicit instruction not to. Even
+		  // this narrow a generative task didn't reach reliable
+		  // zero-fabrication at this model size, so the catalog, download
+		  // pipeline, server lifecycle and picker UI were removed rather than
+		  // left dormant.
 		  CleanupPartFiles
-		  Var id As String = SelectedModelId()
-		  If id = "" Then
-		    // First run: hold the embedding download until the user has picked a
-		    // chat model in the picker — the picker discloses the extra one-time
-		    // download, so acting on it counts as informed consent.
-		    SendBackendState("no-model", "")
-		  Else
-		    EnsureEmbeddingModel
-		    EnsureRerankModel
-		    // StartServer(id) — chat-model auto-start deliberately disabled
-		    // 2026-08-29. XDOXSession no longer calls the chat-completion
-		    // model at all (see its PrepareRequest comment and the
-		    // retrieval-quality-backlog memory's Task 2 phase 3): replies
-		    // now render matched documentation text directly instead of
-		    // generating one.
-		    //
-		    // Two follow-up uses were deliberately explored and rejected the
-		    // same day before disabling this, not just assumed unnecessary:
-		    // (1) query-rewriting for retrieval (e.g. folding a follow-up
-		    // like "how about android?" into a standalone search query) —
-		    // measured directly against the DB across 3 repros, mixed/no
-		    // real improvement over plain history-concatenation, same
-		    // conclusion as an earlier 2026-08-16 attempt; (2) asking ONE
-		    // narrow clarifying question back to the user when retrieval is
-		    // ambiguous or empty, explicitly told not to state any Xojo fact
-		    // — worked cleanly for pure platform-choice questions, but a
-		    // harder repro (a query touching a deprecated API) leaked an
-		    // unrequested factual claim in 3 of 5 runs despite the explicit
-		    // instruction not to. Even this narrow a generative task doesn't
-		    // reach reliable zero-fabrication at this model size.
-		    //
-		    // Left as a one-line re-enable (uncomment StartServer(id) above)
-		    // rather than ripping out the surrounding catalog/download/
-		    // picker infrastructure, which stays intact in case a future,
-		    // even-narrower use is found, or a better local model changes
-		    // this calculus.
-		  End If
+		  EnsureEmbeddingModel
+		  EnsureRerankModel
+		  SendToJS("receiveModelStatus(" + If(EmbeddingModelInstalled, "false", "true") + "," + If(RerankModelInstalled, "false", "true") + ");")
 
 		  StartEmbedServer
 		  StartRerankServer
 		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function BaseURL() As String
-		  // Single source of truth for the llama-server endpoint — used by the
-		  // launch args, the adoption probe, health polling and XDOXSession.
-		  Return "http://127.0.0.1:" + kServerPort
-		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -309,79 +289,6 @@ Protected Module ModelManager
 		End Sub
 	#tag EndMethod
 
-	#tag Method, Flags = &h21
-		Private Function CatalogEntry(id As String, name As String, description As String, ram As String, repo As String, filename As String, bytes As Int64, recommended As Boolean, sha256 As String) As JSONItem
-		  Var entry As New JSONItem
-		  entry.Value("id") = id
-		  entry.Value("name") = name
-		  entry.Value("description") = description
-		  entry.Value("ram") = ram
-		  entry.Value("repo") = repo
-		  entry.Value("filename") = filename
-		  entry.Value("bytes") = bytes
-		  entry.Value("recommended") = recommended
-		  entry.Value("sha256") = sha256
-		  Return entry
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function CatalogJSON() As String
-		  // Static text-only model catalog (no mmproj — XDOX is text-only).
-		  // bytes = exact HF download size, used to verify completed downloads.
-		  Var catalog As New JSONItem
-		  // Coder 7B is the recommended default: in testing (July 2026) it was the
-		  // smallest model that reproduced doc syntax faithfully — the 4B models
-		  // recite syntax rules correctly but violate them in their own code.
-		  catalog.Add(CatalogEntry("qwen25-coder-7b-q6", "Qwen2.5 Coder 7B (Q6)", "Alibaba. Most accurate Xojo code answers, for 16 GB+ Macs.", "~9 GB", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "qwen2.5-coder-7b-instruct-q6_k.gguf", 6254198784, True, "46291ddea1bfb608fe63d9a1907eea6918bda87a7626593edc4bf97c5fd73f9d"))
-		  catalog.Add(CatalogEntry("qwen3-4b-q4", "Qwen3 4B Instruct (Q4)", "Alibaba. Fast and light, fits 8 GB Macs.", "~5 GB", "unsloth/Qwen3-4B-Instruct-2507-GGUF", "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497281120, False, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"))
-		  catalog.Add(CatalogEntry("gemma3-4b-q4", "Gemma 3 4B (Q4)", "Google. Strong all-rounder, fits 8 GB Macs.", "~5 GB", "ggml-org/gemma-3-4b-it-GGUF", "gemma-3-4b-it-Q4_K_M.gguf", 2489757856, False, "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863"))
-		  catalog.Add(CatalogEntry("phi4-mini-q4", "Phi-4 Mini 3.8B (Q4)", "Microsoft, MIT licence. Good reasoning, fits 8 GB Macs.", "~5 GB", "unsloth/Phi-4-mini-instruct-GGUF", "Phi-4-mini-instruct-Q4_K_M.gguf", 2491874272, False, "88c00229914083cd112853aab84ed51b87bdf6b9ce42f532d8c85c7c63b1730a"))
-		  catalog.Add(CatalogEntry("gpt-oss-20b", "GPT-OSS 20B (MXFP4)", "OpenAI. Strongest option, for 16 GB+ Macs.", "~16 GB", "ggml-org/gpt-oss-20b-GGUF", "gpt-oss-20b-mxfp4.gguf", 12109566560, False, "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901"))
-		  catalog.Add(CatalogEntry("mistral-small-24b-q4", "Mistral Small 3.2 24B (Q4)", "Mistral (EU). Big and capable, for 24 GB+ Macs.", "~17 GB", "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF", "mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf", 14333915264, False, "80f5bda68f156f12650ca03a0a2dbfae06a215ac41caa773b8631a479f82415e"))
-		  Return catalog.ToString
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Sub DownloadModel(modelId As String)
-		  Var entry As JSONItem = FindCatalogEntry(modelId)
-		  If entry = Nil Then Return
-		  Var repo As String = entry.Lookup("repo", "")
-		  Var filename As String = entry.Lookup("filename", "")
-		  Var bytes As Int64 = entry.Lookup("bytes", 0).Int64Value
-		  Var sha256 As String = entry.Lookup("sha256", "")
-
-		  If mDownloads = Nil Then mDownloads = New Dictionary
-		  If IsModelBusy(modelId) Then Return // already downloading or verifying
-		  Var url As String = kHFBase + "/" + repo + "/resolve/main/" + filename
-		  // Download directly to a .part file; OnFileReceived renames it
-		  Var dest As FolderItem = ModelsFolder().Child(filename + ".part")
-
-		  Var conn As New URLConnection
-		  AddHandler conn.FileReceived, AddressOf OnFileReceived
-		  AddHandler conn.ReceivingProgressed, AddressOf OnReceivingProgressed
-		  AddHandler conn.Error, AddressOf OnDownloadError
-
-		  Var info As New Dictionary
-		  info.Value("modelId") = modelId
-		  info.Value("filename") = filename
-		  info.Value("bytes") = bytes
-		  info.Value("sha256") = sha256
-		  info.Value("lastProgressTick") = System.Ticks
-		  mDownloads.Value(conn) = info
-
-		  conn.Send("GET", url, dest)
-		  StartStallWatchdog
-
-		  // The user's first chat-model download doubles as consent for the fixed
-		  // embedding and reranker models (disclosed in the picker) — fetch all
-		  // three in parallel.
-		  EnsureEmbeddingModel
-		  EnsureRerankModel
-		End Sub
-	#tag EndMethod
-
 	#tag Method, Flags = &h0
 		Function EmbeddingModelInstalled() As Boolean
 		  Var f As FolderItem = ModelsFolder().Child(Embedder.kEmbedModelFile)
@@ -405,34 +312,6 @@ Protected Module ModelManager
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function FindCatalogEntry(modelId As String) As JSONItem
-		  Var catalog As New JSONItem(CatalogJSON())
-		  For i As Integer = 0 To catalog.Count - 1
-		    Var entry As JSONItem = JSONItem(catalog.ValueAt(i))
-		    If entry.Lookup("id", "") = modelId Then Return entry
-		  Next
-		  Return Nil
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function InstalledModelsJSON() As String
-		  // { "<id>": true/false, ... } — file present (any size > 0) counts as
-		  // installed. Exact-size verification happens only at download time:
-		  // locally adopted files may differ a few bytes from the current HF blob.
-		  Var folder As FolderItem = ModelsFolder()
-		  Var result As New JSONItem
-		  Var catalog As New JSONItem(CatalogJSON())
-		  For i As Integer = 0 To catalog.Count - 1
-		    Var entry As JSONItem = JSONItem(catalog.ValueAt(i))
-		    Var fi As FolderItem = folder.Child(entry.Lookup("filename", ""))
-		    result.Value(entry.Lookup("id", "").StringValue) = (fi <> Nil And fi.Exists And fi.Length > 0)
-		  Next
-		  Return result.ToString
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
 		Private Function JSEscape(s As String) As String
 		  s = s.ReplaceAll("\", "\\")
 		  s = s.ReplaceAll("""", "\""")
@@ -444,140 +323,12 @@ Protected Module ModelManager
 		End Function
 	#tag EndMethod
 
-	#tag Method, Flags = &h21
-		Private Sub LaunchServer(modelPath As String)
-		  Var probe As String = ProbeExistingServer(modelPath)
-		  If probe = "adopt" Then
-		    mServerAdopted = True
-		    mServerReady = True
-		    SendBackendState("ready", "")
-		    StartAdoptedWatchdog
-		    Return
-		  ElseIf probe <> "none" Then
-		    SendBackendState("port-conflict", probe)
-		    Return
-		  End If
-
-		  Var serverBin As FolderItem = ServerBinary()
-		  If serverBin = Nil Or Not serverBin.Exists Then
-		    SendBackendState("error", "llama-server binary not found")
-		    Return
-		  End If
-
-		  Var args() As String
-		  args.Add("--model")
-		  args.Add(modelPath)
-		  args.Add("--port")
-		  args.Add(kServerPort)
-		  args.Add("--host")
-		  args.Add("127.0.0.1")
-		  args.Add("--ctx-size")
-		  args.Add(kContextSize.ToString)
-		  // One conversation at a time: a single slot gets the full context and
-		  // avoids the 4× KV-cache allocation of the server's default 4 slots.
-		  args.Add("--parallel")
-		  args.Add("1")
-		  args.Add("-ngl")
-		  args.Add("99")
-
-		  mServerReady = False
-		  mServerTask = New NSTaskMBS
-		  mServerTask.launchPath = serverBin.NativePath
-		  mServerTask.setArguments(args)
-
-		  Var stdoutPipe As New NSPipeMBS
-		  mServerTask.setStandardOutput(stdoutPipe)
-		  mServerTask.setStandardError(stdoutPipe)
-		  mServerTask.launch()
-
-		  mServerStdoutHandle = stdoutPipe.fileHandleForReading
-		  mServerStdoutObserver = New NSNotificationObserverMBS
-		  AddHandler mServerStdoutObserver.GotNotification, AddressOf OnServerOutput
-		  NSNotificationCenterMBS.defaultCenter.addObserver(mServerStdoutObserver, NSFileHandleMBS.NSFileHandleDataAvailableNotification, mServerStdoutHandle)
-		  mServerStdoutHandle.waitForDataInBackgroundAndNotify
-
-		  SendBackendState("loading", "")
-		  StartHealthPolling
-		End Sub
-	#tag EndMethod
-
 	#tag Method, Flags = &h0
 		Function ModelsFolder() As FolderItem
 		  Var models As FolderItem = Paths.AppSupport.Child("models")
 		  If Not models.Exists Then models.CreateFolder
 		  Return models
 		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnCrashCheckTimer(sender As Timer)
-		  #Pragma Unused sender
-		  If mServerTask <> Nil And Not mServerTask.isRunning Then
-		    Var wasReady As Boolean = mServerReady
-		    App.AppendDebugLog("ModelManager: llama-server exited" + If(wasReady, " after becoming ready", " before becoming ready") + EndOfLine)
-		    StopServer
-		    SendBackendState("crashed", "")
-		  End If
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub StartAdoptedWatchdog()
-		  // Adopted servers have no NSTaskMBS handle, so there is no stdout pipe
-		  // and no EOF signal if they die later — poll /health instead.
-		  If mAdoptedWatchdogTimer = Nil Then
-		    mAdoptedWatchdogTimer = New Timer
-		    mAdoptedWatchdogTimer.Period = kAdoptedWatchdogMS
-		    AddHandler mAdoptedWatchdogTimer.Action, AddressOf OnAdoptedWatchdogTimer
-		  End If
-		  mAdoptedWatchdogTimer.RunMode = Timer.RunModes.Multiple
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnAdoptedWatchdogTimer(sender As Timer)
-		  If Not mServerAdopted Then
-		    sender.RunMode = Timer.RunModes.Off
-		    Return
-		  End If
-		  If mAdoptedWatchdogConn <> Nil Then Return // previous probe still in flight
-		  mAdoptedWatchdogConn = New URLConnection
-		  AddHandler mAdoptedWatchdogConn.ContentReceived, AddressOf OnAdoptedWatchdogReceived
-		  AddHandler mAdoptedWatchdogConn.Error, AddressOf OnAdoptedWatchdogError
-		  mAdoptedWatchdogConn.Send("GET", BaseURL() + "/health")
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnAdoptedWatchdogReceived(sender As URLConnection, url As String, httpStatus As Integer, content As String)
-		  #Pragma Unused url
-		  #Pragma Unused content
-		  // A stale connection from a server StopServer already tore down can
-		  // still deliver its callback after a new one has been started —
-		  // ignore anything that isn't the connection we're currently tracking.
-		  If sender <> mAdoptedWatchdogConn Then Return
-		  mAdoptedWatchdogConn = Nil
-		  If httpStatus <> 200 Then HandleAdoptedWatchdogFailure
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnAdoptedWatchdogError(sender As URLConnection, err As RuntimeException)
-		  #Pragma Unused err
-		  If sender <> mAdoptedWatchdogConn Then Return
-		  mAdoptedWatchdogConn = Nil
-		  HandleAdoptedWatchdogFailure
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub HandleAdoptedWatchdogFailure()
-		  If Not mServerAdopted Then Return // already stopped by another path
-		  App.AppendDebugLog("ModelManager: adopted llama-server failed health check — treating as crashed" + EndOfLine)
-		  If mAdoptedWatchdogTimer <> Nil Then mAdoptedWatchdogTimer.RunMode = Timer.RunModes.Off
-		  StopServer
-		  SendBackendState("crashed", "")
-		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
@@ -734,52 +485,6 @@ Protected Module ModelManager
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Sub OnHealthError(sender As URLConnection, err As RuntimeException)
-		  #Pragma Unused sender
-		  #Pragma Unused err
-		  // Connection refused — server socket not up yet. Keep polling; the
-		  // 60 s grace cutoff lives in OnHealthTimer.
-		  mHealthConn = Nil
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnHealthReceived(sender As URLConnection, url As String, httpStatus As Integer, content As String)
-		  #Pragma Unused sender
-		  #Pragma Unused url
-		  #Pragma Unused content
-		  mHealthConn = Nil
-		  If httpStatus = 200 Then
-		    mServerReady = True
-		    StopHealthPolling
-		    SendBackendState("ready", "")
-		  End If
-		  // 503 = model still loading — keep polling.
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub OnHealthTimer(sender As Timer)
-		  If mServerReady Then
-		    StopHealthPolling
-		    Return
-		  End If
-		  mHealthElapsed = mHealthElapsed + (sender.Period / 1000)
-		  If mHealthElapsed > kHealthGraceSeconds Then
-		    StopHealthPolling
-		    App.AppendDebugLog("ModelManager: server did not become healthy within " + kHealthGraceSeconds.ToString + "s" + EndOfLine)
-		    SendBackendState("error", "Model failed to load — see debug log")
-		    Return
-		  End If
-		  If mHealthConn <> Nil Then Return // previous probe still in flight
-		  mHealthConn = New URLConnection
-		  AddHandler mHealthConn.ContentReceived, AddressOf OnHealthReceived
-		  AddHandler mHealthConn.Error, AddressOf OnHealthError
-		  mHealthConn.Send("GET", BaseURL() + "/health")
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
 		Private Sub OnReceivingProgressed(sender As URLConnection, bytesReceived As Int64, totalBytes As Int64, newData As String)
 		  #Pragma Unused newData
 		  If mDownloads = Nil Or Not mDownloads.HasKey(sender) Then Return
@@ -840,75 +545,6 @@ Protected Module ModelManager
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Sub OnServerOutput(observer As NSNotificationObserverMBS, notification As NSNotificationMBS)
-		  #Pragma Unused observer
-		  #Pragma Unused notification
-		  If mServerStdoutHandle = Nil Then Return
-		  Var data As MemoryBlock = mServerStdoutHandle.availableData
-		  If data <> Nil And data.Size > 0 Then
-		    Var line As String = DefineEncoding(data.StringValue(0, data.Size), Encodings.UTF8)
-		    If Not mServerReady And (line.IndexOf("HTTP server listening") >= 0 Or line.IndexOf("server listening") >= 0) Then
-		      // Socket is up; /health flips us to "ready" once the model is loaded.
-		    End If
-		    mServerStdoutHandle.waitForDataInBackgroundAndNotify
-		  Else
-		    // 0 bytes means EOF on the pipe — the write end closed, so the process
-		    // has exited (or is about to). Do NOT re-arm
-		    // waitForDataInBackgroundAndNotify here: EOF is permanent, so that
-		    // would spin synchronously on the main thread. Instead give the process
-		    // a brief grace period via a one-shot timer before reporting a crash.
-		    // Arm regardless of mServerReady — a server that crashes after
-		    // becoming ready needs recovery just as much as one that never came up.
-		    mCrashCheckTimer = New Timer
-		    mCrashCheckTimer.Period = 500
-		    AddHandler mCrashCheckTimer.Action, AddressOf OnCrashCheckTimer
-		    mCrashCheckTimer.RunMode = Timer.RunModes.Single
-		  End If
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function ProbeExistingServer(expectedModelPath As String) As String
-		  // A stale llama-server from a previous debug session can be left running
-		  // on the server port. Starting a second instance against the same port
-		  // always fails ("couldn't bind HTTP server socket"), which looks like a
-		  // crash even though the original server is healthy. Probe /props first:
-		  // nothing listening -> "none" (launch normally); a llama-server with the
-		  // expected model -> "adopt" (reuse it); anything else -> a conflict
-		  // message (don't launch a doomed instance, surface the conflict instead).
-		  Var raw As String
-		  Try
-		    Var conn As New URLConnection
-		    raw = conn.SendSync("GET", BaseURL() + "/props", 2)
-		  Catch e As NetworkException
-		    Return "none"
-		  End Try
-
-		  Try
-		    Var props As New JSONItem(raw)
-		    Var runningModel As String = props.Lookup("model_path", "").StringValue
-		    If runningModel = "" Then
-		      // Answers JSON on /props but doesn't name a model (llama-server
-		      // versions differ in shape) — close enough to adopt
-		      Return "adopt"
-		    End If
-		    If FileNameFromPath(runningModel) = FileNameFromPath(expectedModelPath) Then
-		      Return "adopt"
-		    End If
-		    Return "Port " + kServerPort + " is used by another llama-server (model: " + FileNameFromPath(runningModel) + ")"
-		  Catch e As RuntimeException
-		    Return "Port " + kServerPort + " is used by another application"
-		  End Try
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub SendBackendState(state As String, detail As String)
-		  SendToJS("receiveBackendState(" + JSEscape(state) + "," + JSEscape(detail) + ");")
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
 		Private Sub SendToJS(js As String)
 		  Try
 		    Window1.MainView.EvaluateJavaScript(js)
@@ -926,86 +562,6 @@ Protected Module ModelManager
 		  If f <> Nil And f.Exists Then Return f
 		  Return App.FindFile("Binaries/llama-server")
 		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Sub SaveSelectedModel(modelId As String)
-		  DBHelper.SetMetadata("selected_model", modelId)
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function SelectedModelId() As String
-		  Return DBHelper.GetMetadata("selected_model")
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Function ServerReady() As Boolean
-		  Return mServerReady
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Sub StartServer(modelId As String)
-		  If mServerTask <> Nil And mServerTask.isRunning Then Return
-
-		  Var entry As JSONItem = FindCatalogEntry(modelId)
-		  If entry = Nil Then
-		    SendBackendState("no-model", "")
-		    Return
-		  End If
-		  Var modelFi As FolderItem = ModelsFolder().Child(entry.Lookup("filename", ""))
-		  If modelFi = Nil Or Not modelFi.Exists Then
-		    SendBackendState("not-downloaded", modelId)
-		    Return
-		  End If
-		  LaunchServer(modelFi.NativePath)
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub StartHealthPolling()
-		  mHealthElapsed = 0
-		  If mHealthTimer = Nil Then
-		    mHealthTimer = New Timer
-		    mHealthTimer.Period = 3000
-		    AddHandler mHealthTimer.Action, AddressOf OnHealthTimer
-		  End If
-		  mHealthTimer.RunMode = Timer.RunModes.Multiple
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Sub StopHealthPolling()
-		  If mHealthTimer <> Nil Then
-		    mHealthTimer.RunMode = Timer.RunModes.Off
-		  End If
-		  mHealthConn = Nil
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h0
-		Sub StopServer()
-		  StopHealthPolling
-		  If mAdoptedWatchdogTimer <> Nil Then mAdoptedWatchdogTimer.RunMode = Timer.RunModes.Off
-		  If mAdoptedWatchdogConn <> Nil Then mAdoptedWatchdogConn.Disconnect
-		  mAdoptedWatchdogConn = Nil
-		  If mServerTask <> Nil And mServerTask.isRunning Then
-		    mServerTask.terminate()
-		  ElseIf mServerAdopted Then
-		    // Adopted servers have no NSTaskMBS handle — kill by command line.
-		    KillAdoptedServer(kServerPort)
-		  End If
-		  mServerAdopted = False
-		  mServerTask = Nil
-		  If mServerStdoutObserver <> Nil Then
-		    NSNotificationCenterMBS.defaultCenter.removeObserver(mServerStdoutObserver)
-		    mServerStdoutObserver = Nil
-		  End If
-		  mServerStdoutHandle = Nil
-		  mServerReady = False
-		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -1335,16 +891,28 @@ Protected Module ModelManager
 		  // the CURRENT --ctx-size (4096) specifically, not just "> 512" — an
 		  // old build that tried 40960 and crashed on launch never got this far,
 		  // but a hypothetical future value change should still force a replace.
+		  //
+		  // ALSO checks total slots (ProbeSlotCount) — added alongside the
+		  // --parallel 1→2 bump (split-bubble redesign, 2026-08-30):
+		  // n_ctx alone can't distinguish an old single-slot server from the
+		  // new 2-slot one, both report n_ctx=4096, so a stale --parallel 1
+		  // server would otherwise pass this check and get silently adopted,
+		  // capping the concurrency this change exists to enable. Slot count
+		  // 0 (older llama-server build, field absent) is treated as
+		  // "unknown" and does NOT force a replace — only a CONFIRMED
+		  // single-slot server (slots = 1) does, same "only replace on
+		  // positive evidence of staleness" discipline as the n_ctx check.
 		  Var probe As String = ProbeExistingServerOn(RerankBaseURL(), modelFi.NativePath)
 		  If probe = "adopt" Then
-		    If ProbeSlotCtx(RerankBaseURL()) = 4096 Then
+		    Var slots As Integer = ProbeSlotCount(RerankBaseURL())
+		    If ProbeSlotCtx(RerankBaseURL()) = 4096 And slots <> 1 Then
 		      mRerankAdopted = True
 		      App.AppendDebugLog("ModelManager: adopted existing reranker server on port " + kRerankPort + EndOfLine)
 		      OnRerankServerBecameReady
 		      StartAdoptedRerankWatchdog
 		      Return
 		    End If
-		    App.AppendDebugLog("ModelManager: stale reranker server runs the old small-batch regime — replacing it" + EndOfLine)
+		    App.AppendDebugLog("ModelManager: stale reranker server runs the old small-batch or single-slot regime — replacing it" + EndOfLine)
 		    KillAdoptedServer(kRerankPort)
 		    For i As Integer = 1 To 10
 		      If ProbeExistingServerOn(RerankBaseURL(), modelFi.NativePath) = "none" Then Exit
@@ -1389,8 +957,21 @@ Protected Module ModelManager
 		  args.Add("4096")
 		  args.Add("--ubatch-size")
 		  args.Add("4096")
+		  // 2 slots, not 1: the split-bubble redesign (reactive-coalescing-
+		  // thimble plan, Decision 1, 2026-08-30) runs native and MBS
+		  // reranking as two independent ChatPrepThread workers that can
+		  // call Reranker.RerankBatch concurrently — with --parallel 1 the
+		  // second call queues behind the first INSIDE this server
+		  // regardless of Xojo-side threading, capping the actual
+		  // responsiveness win. NOT verified safe to raise further than 2:
+		  // each parallel slot gets its own full --ctx-size KV-cache
+		  // allocation, and the comment above (Matching the model's full
+		  // context crashed the server silently on launch with -ngl 99
+		  // forcing full GPU offload) is exactly the failure mode a bigger
+		  // multiply here could hit again. Only ever 2 concurrent callers
+		  // exist (native pool, MBS pool) — no need to go higher.
 		  args.Add("--parallel")
-		  args.Add("1")
+		  args.Add("2")
 		  args.Add("-ngl")
 		  args.Add("99")
 
@@ -1587,7 +1168,6 @@ Protected Module ModelManager
 
 	#tag Method, Flags = &h0
 		Sub StopAllServers()
-		  StopServer
 		  StopEmbedServer
 		  StopRerankServer
 		End Sub
@@ -1613,6 +1193,36 @@ Protected Module ModelManager
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
+		Private Function ProbeSlotCount(baseURL As String) As Integer
+		  // Total parallel slots a running server was launched with, read
+		  // from /props (total_slots, a field newer llama-server builds
+		  // report). 0 if unreachable, unparsable, or the field is absent
+		  // (older server build — treated as "unknown," not "1," by the
+		  // caller, so an unparsable response doesn't itself force a
+		  // needless restart).
+		  //
+		  // Added alongside StartRerankServer's --parallel 1→2 bump (split-
+		  // bubble redesign, Decision 1, 2026-08-30): ProbeSlotCtx alone
+		  // (n_ctx) can't tell a stale, already-running --parallel 1
+		  // reranker apart from the new --parallel 2 regime — both report
+		  // n_ctx=4096 — so a server adopted from before this change would
+		  // otherwise silently keep running single-slot, capping the
+		  // concurrency this change exists to enable, with no error and no
+		  // log line to explain why the second rerank call still queues.
+		  Try
+		    Var conn As New URLConnection
+		    #Pragma BreakOnExceptions False
+		    Var raw As String = conn.SendSync("GET", baseURL + "/props", 2)
+		    #Pragma BreakOnExceptions Default
+		    Var props As New JSONItem(raw)
+		    Return props.Lookup("total_slots", 0)
+		  Catch e As RuntimeException
+		    Return 0
+		  End Try
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
 		Private Sub KillAdoptedServer(port As String)
 		  // Only called when the adoption flag is set, i.e. /props confirmed the
 		  // process is a llama-server running OUR model — a foreign process on
@@ -1627,27 +1237,6 @@ Protected Module ModelManager
 		End Sub
 	#tag EndMethod
 
-	#tag Method, Flags = &h0
-		Sub SwitchModel(modelId As String)
-		  // User picked a different model: persist, restart the server on it.
-		  SaveSelectedModel(modelId)
-		  StopServer
-		  StartServer(modelId)
-		  // Covers the first-run path where a chat model was already on disk and
-		  // the user selected it without downloading anything.
-		  EnsureEmbeddingModel
-		  EnsureRerankModel
-		End Sub
-	#tag EndMethod
-
-
-	#tag Property, Flags = &h21
-		Private mCrashCheckTimer As Timer
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mAdoptedWatchdogTimer As Timer
-	#tag EndProperty
 
 	#tag Property, Flags = &h21
 		Private mAdoptedEmbedWatchdogTimer As Timer
@@ -1655,10 +1244,6 @@ Protected Module ModelManager
 
 	#tag Property, Flags = &h21
 		Private mAdoptedRerankWatchdogTimer As Timer
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mAdoptedWatchdogConn As URLConnection
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1683,10 +1268,6 @@ Protected Module ModelManager
 
 	#tag Property, Flags = &h21
 		Private mRerankAdopted As Boolean
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mServerAdopted As Boolean
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -1754,44 +1335,13 @@ Protected Module ModelManager
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mHealthConn As URLConnection
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mHealthElapsed As Double
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mHealthTimer As Timer
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
 		Private mLastProgressTick As Double
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mServerReady As Boolean
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mServerStdoutHandle As NSFileHandleMBS
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mServerStdoutObserver As NSNotificationObserverMBS
-	#tag EndProperty
-
-	#tag Property, Flags = &h21
-		Private mServerTask As NSTaskMBS
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
 		Private mStallTimer As Timer
 	#tag EndProperty
 
-
-	#tag Constant, Name = kContextSize, Type = Double, Dynamic = False, Default = \"8192", Scope = Public
-	#tag EndConstant
 
 	#tag Constant, Name = kDownloadStallSeconds, Type = Double, Dynamic = False, Default = \"90", Scope = Private
 	#tag EndConstant
@@ -1809,9 +1359,6 @@ Protected Module ModelManager
 	#tag EndConstant
 
 	#tag Constant, Name = kHealthGraceSeconds, Type = Double, Dynamic = False, Default = \"60", Scope = Private
-	#tag EndConstant
-
-	#tag Constant, Name = kServerPort, Type = String, Dynamic = False, Default = \"8091", Scope = Public
 	#tag EndConstant
 
 

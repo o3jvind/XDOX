@@ -3,22 +3,26 @@ Public Class ChatPrepThread
 Inherits Thread
 	#tag Event
 		Sub Run()
-		  // Off-main-thread request preparation. Retrieval (embedding via
-		  // Embedder.FetchEmbedding → SendSync, plus the reranker call) makes
-		  // synchronous HTTP calls to local servers, so this runs on a worker
-		  // thread to keep the UI responsive. The finished answer text is
-		  // handed back to the session on the MAIN thread (UserInterfaceUpdate)
-		  // for rendering — there's no streaming connection to open anymore
-		  // (see XDOXSession.PrepareRequest's comment: no chat-model
-		  // generation happens in this flow at all as of 2026-08-29).
+		  // Off-main-thread request preparation for ONE pool ("native" or
+		  // "mbs") — split-bubble redesign (reactive-coalescing-thimble
+		  // plan, Decision 1, 2026-08-30): XDOXSession.SendMessage now
+		  // starts up to TWO of these, one per pool, so each pool's search
+		  // (embedding via Embedder.FetchEmbedding → SendSync, plus its own
+		  // reranker call) runs and completes independently — whichever
+		  // finishes first posts back to the main thread first, without
+		  // waiting on the other. There's no chat-model generation to
+		  // stream anymore either way (see XDOXSession.PrepareRequest's
+		  // comment: no chat-model has been called in this flow since
+		  // 2026-08-29).
 		  //
 		  // Uses its OWN DB connection so retrieval reads never share the
-		  // main-thread handle (WAL allows the concurrent reader).
+		  // main-thread handle, OR the other pool's worker's connection
+		  // (WAL allows concurrent readers).
 		  Var conn As SQLiteDatabase = DBHelper.OpenConnection
 		  Try
-		    Session.PrepareRequest(mUserMessage, mHistory, conn, mMatchStatus, mAnswerText)
+		    Session.PrepareRequest(mUserMessage, mPool, mPrevUserMessage, mPrevReply, conn, mMatchStatus, mAnswerText)
 		  Catch e As RuntimeException
-		    App.AppendDebugLog("ChatPrepThread: " + e.Message + EndOfLine)
+		    App.AppendDebugLog("ChatPrepThread (" + mPool + "): " + e.Message + EndOfLine)
 		    mFailed = True
 		  End Try
 		  If conn <> Nil Then conn.Close
@@ -29,21 +33,23 @@ Inherits Thread
 	#tag Event
 		Sub UserInterfaceUpdate(data() As Dictionary)
 		  #Pragma Unused data
-		  // Back on the main thread — render the prepared answer.
-		  // BeginStreaming (name kept for now) drops the call if mGeneration
-		  // has moved on (user stopped / resent).
+		  // Back on the main thread — render this pool's prepared answer.
+		  // BeginStreamingForPool drops the call if mGeneration has moved on
+		  // (user stopped / resent).
 		  If Session <> Nil Then
-		    Session.BeginStreaming(mGeneration, mUserMessage, mMatchStatus, mAnswerText, mFailed)
+		    Session.BeginStreamingForPool(mGeneration, mPool, mUserMessage, mMatchStatus, mAnswerText, mFailed)
 		  End If
 		End Sub
 	#tag EndEvent
 
 
 	#tag Method, Flags = &h0
-		Sub Configure(session As XDOXSession, userMessage As String, history() As String, generation As Integer)
+		Sub Configure(session As XDOXSession, pool As String, userMessage As String, prevUserMessage As String, prevReply As String, generation As Integer)
 		  Self.Session = session
+		  mPool = pool
 		  mUserMessage = userMessage
-		  mHistory = history
+		  mPrevUserMessage = prevUserMessage
+		  mPrevReply = prevReply
 		  mGeneration = generation
 		End Sub
 	#tag EndMethod
@@ -54,11 +60,20 @@ Inherits Thread
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		// "native" or "mbs" — which pool this worker searches.
+		Private mPool As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mUserMessage As String
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
-		Private mHistory() As String
+		Private mPrevUserMessage As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mPrevReply As String
 	#tag EndProperty
 
 	#tag Property, Flags = &h21

@@ -1,6 +1,6 @@
 # XDOX
 
-**A fully local AI assistant for Xojo development.** XDOX chats about the Xojo documentation you already have installed, remembers your own notes, and answers with retrieval-augmented context — all on your Mac, with nothing leaving your machine.
+**A fully local AI assistant for Xojo development.** XDOX searches the Xojo documentation you already have installed, remembers your own notes, and answers with the matched documentation text itself — all on your Mac, with nothing leaving your machine.
 
 Notes are the part that grows over time: a fix or convention you write down once is retrieved into later answers automatically, so you don't re-derive it. The docs describe how Xojo works; your notes record how you work with it.
 
@@ -8,22 +8,21 @@ XDOX is also the knowledge-base engine for the wider ecosystem: it indexes the d
 
 ## Features
 
-- **Chat with the Xojo docs** — streaming answers from a local LLM, grounded in hybrid retrieval (semantic embeddings + BM25 full-text) over the official documentation installed with the Xojo IDE.
+- **Search the Xojo docs** — hybrid retrieval (semantic embeddings + BM25 full-text) over the official documentation installed with the Xojo IDE; answers render the matched documentation text directly, verbatim.
 - **MBS Xojo Plugins docs** — index a downloaded [MBS](https://www.monkeybreadsoftware.net/) Dash docset (Tools → Index MBS Docs…) so plugin classes, methods, and FAQs are searchable alongside the built-in docs. Re-indexing after an MBS update only re-embeds changed entries.
 - **Personal notes** — write notes in Markdown (edit/preview), with auto-tag suggestions and semantic search. Notes are retrieved alongside the docs and take precedence where they disagree, so your own conventions and fixes inform the answer. The same notes are available to coding agents through XMCP.
 - **Multiple Xojo versions** — index several installed Xojo versions side by side and switch which one chat/retrieval uses; old versions can be cleaned up when uninstalled.
-- **Staleness tracking** — notes can be marked *global* (version-independent) or tied to a specific Xojo version; only version-specific notes are flagged ⚠️ for review when a newer version is indexed, and the model is told to caveat them.
-- **Model choice** — a curated catalog of six chat models from five vendors (Alibaba, Google, Microsoft, OpenAI, Mistral), downloaded straight from Hugging Face. Pick what fits your Mac's RAM.
-- **100 % local** — inference runs on a bundled [llama.cpp](https://github.com/ggml-org/llama.cpp) server over loopback HTTP. No API keys, no cloud, no telemetry.
+- **Staleness tracking** — notes can be marked *global* (version-independent) or tied to a specific Xojo version; only version-specific notes are flagged ⚠️ for review when a newer version is indexed.
+- **100 % local** — the search and reranking models run on a bundled [llama.cpp](https://github.com/ggml-org/llama.cpp) server over loopback HTTP. No API keys, no cloud, no telemetry.
 
 ## How it works
 
 ```text
 ┌─────────────────────────── XDOX.app ───────────────────────────┐
 │  Window1 (DesktopWKWebViewControlMBS)                           │
-│    chat UI · notes sidebar · model picker      (src/web-assets) │
+│    chat UI · notes sidebar                     (src/web-assets) │
 │                          │ JS bridge                            │
-│  ChatView / XDOXSession ── SSE ──► llama-server :8091 (chat)    │
+│  ChatView / XDOXSession ── renders matched documentation text   │
 │  Indexer / Embedder ────── HTTP ─► llama-server :8089 (embed)   │
 │                          │                          ▲           │
 │  SQLite (WAL)  ~/Library/…/xdox.db                  │           │
@@ -35,21 +34,10 @@ XDOX is also the knowledge-base engine for the wider ecosystem: it indexes the d
 ```
 
 - **Indexing:** on first run (and whenever a newly-installed version is detected) XDOX parses the documentation bundle (`llms-full.txt`) installed with the Xojo IDE, chunks it, and embeds every chunk with `nomic-embed-text-v1.5` (768-dim). Multiple Xojo versions can be indexed side by side (each chunk carries a `docs_version`); adding a version is non-destructive to the others. Indexing is resumable; if the embedding server isn't up yet, the index completes BM25-only and embeddings are backfilled silently.
-- **Retrieval:** each question is scored 0.7·cosine + 0.3·normalised BM25 across docs and notes, with neighbour-chunk expansion, filtered to the active Xojo version (plus version-independent chunks). If the embedding server is down, search falls back to keyword-only — the status bar shows which tier is active.
-- **Chat:** OpenAI-style streaming completions against the bundled `llama-server`. Conversation history lives in Xojo; the RAG context is rebuilt fresh for every message, with a token guard that trims context before it overflows the model's window.
+- **Retrieval:** each question is scored 0.7·cosine + 0.3·normalised BM25 across docs and notes, with neighbour-chunk expansion, filtered to the active Xojo version (plus version-independent chunks), then reranked by a cross-encoder that also gates out no-match results. If the embedding server is down, search falls back to keyword-only — the status bar shows which tier is active.
+- **Answers:** XDOX does not generate replies with an LLM — a local chat-completion model was tried and dropped (2026-08-29) after testing found it fabricated facts and code too often. Instead, the best-matching documentation chunks (native docs and MBS docs, grouped separately) render directly as the answer, verbatim. Conversation history is used only to fold the previous user turn into the retrieval query, so pronoun-dependent follow-ups ("does Xojo have a native way of doing this?") still resolve correctly.
 
-## Chat models
-
-| Model | Vendor | Download | Runs on |
-| --- | --- | --- | --- |
-| Qwen3 4B Instruct (Q4) — *recommended* | Alibaba | 2.3 GB | 8 GB Macs |
-| Gemma 3 4B (Q4) | Google | 2.3 GB | 8 GB Macs |
-| Phi-4 Mini 3.8B (Q4) | Microsoft | 2.3 GB | 8 GB Macs |
-| Qwen2.5 Coder 7B (Q6) | Alibaba | 5.8 GB | 16 GB+ Macs |
-| GPT-OSS 20B (MXFP4) | OpenAI | 11.3 GB | 16 GB+ Macs |
-| Mistral Small 3.2 24B (Q4) | Mistral | 13.3 GB | 24 GB+ Macs |
-
-The embedding model (`nomic-embed-text-v1.5` Q8_0) is fixed — the database schema and XMCP both assume it.
+The embedding model (`nomic-embed-text-v1.5` Q8_0) and the reranker (`Qwen3-Reranker-4B` Q8_0) are both fixed dependencies, downloaded automatically on first launch — the database schema and XMCP both assume the embedding model.
 
 ## Requirements
 
@@ -76,7 +64,7 @@ The embedding model (`nomic-embed-text-v1.5` Q8_0) is fixed — the database sch
 
 3. Debug builds need a local `llama-server` binary (arm64) at `Binaries/llama-server` — it's gitignored and not distributed in this repo. Build it yourself from [llama.cpp](https://github.com/ggml-org/llama.cpp) or drop in a prebuilt arm64 binary.
 
-4. Open `XDOX.xojo_project` in the Xojo IDE and Run. On first launch XDOX indexes the docs, then prompts you to download a chat model.
+4. Open `XDOX.xojo_project` in the Xojo IDE and Run. On first launch XDOX indexes the docs and automatically downloads the fixed embedding and reranker models (a one-time ~4.5 GB download) — no model choice is needed.
 
 There is no CLI build pipeline — run, debug, and build happen in the Xojo IDE.
 
@@ -108,7 +96,7 @@ XMCP is the companion MCP server that gives MCP-capable coding agents — Claude
 | Concern | Owner |
 | --- | --- |
 | Indexing, embeddings, notes, all database writes | XDOX |
-| Both llama-server processes (chat `8091`, embeddings `8089`) | XDOX |
+| The llama-server embedding process (`8089`) | XDOX |
 | MCP tools, search-time scoring, fallbacks | XMCP (reads `xdox.db`, queries `8089`) |
 
 ### Why semantic search needs XDOX running
@@ -117,7 +105,7 @@ Every docs chunk and note is stored in the database with its embedding ("meaning
 
 ### Behaviour when XDOX is running
 
-- Both llama-servers are up. XDOX's chat and XMCP's search tools deliver the same hybrid quality: 0.7·semantic + 0.3·keyword, over docs *and* your notes.
+- The embedding server is up. XDOX's own search and XMCP's search tools deliver the same hybrid quality: 0.7·semantic + 0.3·keyword, over docs *and* your notes.
 - XDOX's status bar shows "Semantic search" (green); XMCP result headers say `(semantic, Xojo <version>)`.
 - Quitting XDOX (⌘Q) shuts down both servers — including servers a previous instance left behind and the current one merely adopted.
 
@@ -148,14 +136,14 @@ XDOX can index several installed Xojo versions side by side in the one `xdox.db`
 ### Lifecycle details
 
 - **IDE debug-stop** (in Xojo) skips the app's `Closing` event and leaves the llama-servers running as orphans. This is expected: the next XDOX launch detects a healthy server with the right model on the known port (a `GET /props` probe) and *adopts* it instead of starting a duplicate. A real quit (⌘Q) cleans up adopted servers too.
-- **Fixed ports are deliberate.** `8091`/`8089` never change precisely so that orphan adoption and XMCP's hardcoded address keep working.
+- **Fixed ports are deliberate.** `8089` (embedding) never changes precisely so that orphan adoption and XMCP's hardcoded address keep working; the reranker's `8093` follows the same adoption logic for XDOX's own internal use.
 - **Scoring recipe duplication is deliberate.** The hybrid formula (0.7/0.3, note relevance floor 0.45) exists in both XDOX (`Retrieval`) and XMCP (`SemanticSearch`) by choice — a shared search API was considered and rejected as more moving parts than it saves. If the recipe ever changes on one side, port the change to the other.
 - **The per-version filter is duplicated too.** Like the scoring recipe, the `docs_version`/`scope` filtering lives in both `Retrieval` (XDOX) and `SemanticSearch` (XMCP). Port any change to both.
 
 ## Credits
 
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT) — bundled `llama-server` binary powers all inference
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT) — bundled `llama-server` binary powers embedding and reranking
 - [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) — embedding model
+- [Qwen3-Reranker-4B](https://huggingface.co/Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp) — reranker model
 - [marked](https://github.com/markedjs/marked) (MIT) — Markdown rendering in the chat UI (vendored)
 - [EasyMDE](https://github.com/Ionaru/easy-markdown-editor) (MIT) — Markdown editor in the note window (vendored)
-- Chat models are downloaded from their respective Hugging Face repos under their own licences (Apache 2.0, MIT, Gemma, Qwen)

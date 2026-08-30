@@ -142,10 +142,10 @@ Inherits Thread
 		    // Embedding phase. The embed server is started by ModelManager.AutoStart
 		    // (main thread); it may still be warming up, so wait with a grace
 		    // period — but only if the model is on disk at all. On first run the
-		    // download is deferred until the user picks a chat model, so probing
-		    // would just burn 90 s raising connection-refused exceptions. Either
-		    // way the index is complete and usable BM25-only — pending rows are
-		    // embedded later by the resume pass.
+		    // fixed embedding model is still downloading in the background, so
+		    // probing would just burn 90 s raising connection-refused exceptions.
+		    // Either way the index is complete and usable BM25-only — pending
+		    // rows are embedded later by the resume pass.
 		    If ModelManager.EmbeddingModelInstalled And WaitForEmbedServer(90) Then
 		      EmbedPendingChunks(db)
 		    Else

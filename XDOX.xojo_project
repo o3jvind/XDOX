@@ -1,5 +1,5 @@
 Type=Desktop
-RBProjectVersion=2026.02
+RBProjectVersion=2026.021
 MinIDEVersion=20210300
 OrigIDEVersion=20260102
 Class=App;App.xojo_code;&h000000005D39FFFF;&h0000000000000000;false
@@ -41,6 +41,7 @@ Module=MBSIndexer;MBSIndexer.xojo_code;&h000000001A020001;&h0000000000000000;fal
 Interface=MBSParseProgressDelegate;MBSParseProgressDelegate.xojo_code;&h000000001A021001;&h0000000000000000;false
 Module=Reranker;Reranker.xojo_code;&h000000001A022001;&h0000000000000000;false
 Module=SymbolCheck;SymbolCheck.xojo_code;&h000000001A023001;&h0000000000000000;false
+Class=ChatTurn;ChatTurn.xojo_code;&h00000000419B17FF;&h0000000000000000;false
 DefaultWindow=Window1
 AppMenuBar=MainMenuBar
 MajorVersion=0

@@ -6,11 +6,19 @@ Public Interface XDOXSessionDelegate
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub OnCannedResponse(text As String)
+		Sub OnCannedResponse(pool As String, text As String)
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub OnError(message As String)
+		Sub OnPoolDone(pool As String)
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub OnPoolNoMatch(pool As String)
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub OnError(pool As String, message As String)
 	#tag EndMethod
 
 End Interface

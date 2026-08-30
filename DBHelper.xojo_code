@@ -339,6 +339,19 @@ Public Module DBHelper
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Function GetDocsSearchScope() As String
+		  // Which pool(s) XDOXSession.SendMessage starts a ChatPrepThread
+		  // worker for: "all" (default, both), "native" (Xojo docs only), or
+		  // "mbs" (MBS plugin docs only). Read via the shared DB handle even
+		  // from a worker thread — same precedent as GetActiveVersion, safe
+		  // under WAL's concurrent readers.
+		  Var v As String = GetMetadata("docs_search_scope")
+		  If v = "native" Or v = "mbs" Then Return v
+		  Return "all"
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Sub SetActiveVersion(docsVersion As String, conn As SQLiteDatabase = Nil)
 		  SetMetadata("active_docs_version", docsVersion, conn)
 		End Sub
