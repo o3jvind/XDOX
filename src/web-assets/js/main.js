@@ -403,6 +403,22 @@ function receiveDownloadDone(id, ok, err) {
   }
 }
 
+// ── Link handling ────────────────────────────────────────────────────────
+// Chat/note content renders <a href> links (sanitize.js allows the tag and
+// forces target="_blank" as a defence-in-depth default), but this is a
+// WKWebView, not a real browser tab strip — target="_blank" alone has no
+// reliable "open in the user's actual default browser" behavior here.
+// Delegate every link click in the chat area to Xojo's openURL bridge
+// handler (ChatView.xojo_code's didReceiveScriptMessage, which calls
+// ShowURL) instead, same mechanism already used for other Xojo-side actions.
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('a[href]');
+  if (!link) return;
+  if (!document.getElementById('chatArea')?.contains(link)) return;
+  e.preventDefault();
+  postToXojo('openURL', link.getAttribute('href'));
+});
+
 // ── Init ──────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
