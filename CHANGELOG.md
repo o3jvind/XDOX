@@ -53,6 +53,74 @@ built-in Xojo docs, plus retrieval-quality fixes surfaced while building it.
   from schema 4 onward, changes migrate in place (see `MigrateSchema`)
   instead of deleting notes and all indexed chunks. Only a DB below schema 4
   still gets the old recreate-from-template treatment, once.
+- **Native docs and MBS docs are searched, gated, and rendered as two fully
+  independent pools** instead of one merged search
+  (`Retrieval.SearchOnePool`/`MatchStatusForPool`/`BuildUserFacingAnswerForPool`).
+  Each pool computes its own rerank score and gates itself against
+  `Reranker.kNoMatchThreshold` independently, fixing a generic native chunk
+  (e.g. "What is Xojo?") outranking a strong MBS match at the source instead
+  of filtering it out after the fact. `XDOXSession` runs one `ChatPrepThread`
+  per pool and posts each reply as soon as its own search finishes; the chat
+  UI renders up to two bubbles per turn in true completion order, each with
+  its own "Searching Xojo docs…"/"Searching MBS docs…" status, and a pool
+  that finds nothing posts an immediate "no documentation found" bubble
+  rather than staying silent until the whole turn resolves. A docs-search-
+  scope selector (Xojo + MBS / Xojo only / MBS only) lets you constrain
+  which pool(s) run.
+- **Doc parsing and embedding are parallelized.** `MBSDocsetParser` and
+  `RSTParser` split work across `System.CoreCount` preemptive Threads
+  pulling from a shared queue (`MBSFileQueue`) instead of a fixed per-worker
+  file slice, so one worker landing on several large/slow files no longer
+  leaves the others idle at the end of a run. The embed phase replaces its
+  serial loop with a single-writer/queue pipeline (`EmbedWriter` plus a pool
+  of `EmbedWorker`s) matched to the embedding server's `--parallel` slot
+  count, avoiding the SQLite WAL write-lock contention an earlier
+  multi-connection design hit live. The slot count itself is sized from
+  physical RAM (`ModelManager.ChooseEmbedParallelCount`) rather than a fixed
+  constant, though it's currently capped at 2 — testing up to 8 slots on a
+  32GB M1 Max showed no throughput gain past 2, since embedding is
+  GPU-compute-bound on this hardware, not slot-count-bound.
+- Indexing gained a **Pause button** (`IndexProgressWindow`) for the embed
+  phase: stopping only halts new claims, already-claimed batches still embed
+  and write normally, and unclaimed chunks resume automatically on the next
+  reindex.
+- Chat/note links now open in the OS default browser via the existing
+  `openURL` bridge handler instead of `target="_blank"`, which has no
+  meaningful effect inside a `WKWebView`.
+
+### Removed
+
+- **The chat-completion model layer** (`ModelManager`'s catalog, download
+  pipeline, and server lifecycle for a reply-generating LLM) is fully
+  removed. Replies had already stopped using it in favor of rendering
+  retrieved documentation directly, after it fabricated facts and code too
+  often to trust — this removes the now-dormant infrastructure, which had
+  drifted out of sync with `README.md`. `AutoStart` now unconditionally
+  downloads/starts only the embedding and reranker models, with a non-modal
+  first-run disclosure banner replacing the old model picker.
+
+### Fixed
+
+- **Residual non-determinism in MBS docset reindexing**: two collision
+  shapes were conflated when disambiguating same-title chunks
+  (`MBSIndexerThread.DisambiguateSplitSources`) — a single oversized page's
+  own stable `Chunker` split, and genuinely different pages that happen to
+  render the same title (e.g. many FAQ pages titled "FAQ"). Chunks now carry
+  an `OriginGroupID` so the two cases are told apart correctly instead of by
+  title-suffix shape alone, which had wrongly treated some cross-file
+  collisions as already-stable and skipped sorting them.
+  - A smaller, separate race remains **open**: concurrent 10-worker MBS
+    parsing occasionally leaves a small number of chunks (~0.1-0.2%) with an
+    HTML entity left undecoded (e.g. a stray `&quot;`) that varies between
+    otherwise-identical reindexes of an unchanged docset. No content is lost
+    or corrupted — the practical cost is a handful of chunks re-embedded
+    unnecessarily per run. `anchorsByFile`/`anchorSet` were moved to
+    `AtomicDictionaryMBS` and `MBSFileQueue`'s array reads moved inside its
+    lock as hardening, but neither closed the gap; root cause still open.
+- RSTParser's code-block indentation: trimming a code line discarded its own
+  relative indentation along with the wrapping `.rst` file's indentation,
+  flattening nested code structure (e.g. an `If` body one level deeper than
+  its enclosing block). Now only the block's own leading indent is cut.
 
 ## [0.1.1] — 2026-08-13
 
