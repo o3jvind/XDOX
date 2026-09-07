@@ -17,6 +17,10 @@ Public Class DocChunk
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
+		OriginGroupID As Integer = -1
+	#tag EndProperty
+
+	#tag Property, Flags = &h0
 		PrevID As Integer = -1
 	#tag EndProperty
 

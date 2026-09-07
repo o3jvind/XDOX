@@ -1,11 +1,20 @@
 // XDOX — main UI controller.
 // Xojo calls these global functions via EvaluateJavaScript:
-//   appendToken(text)       — defined in chat-handler.js
-//   finalizeMessage()       — defined in chat-handler.js; also resets UI state below
-//   showError(message)      — defined in chat-handler.js; also resets UI state below
+//   showCannedResponseForPool(pool, text) — defined in chat-handler.js; renders one pool's reply
+//   showNoMatchForPool(pool)              — defined in chat-handler.js; that pool's search found nothing
+//   showError(pool, message)              — defined in chat-handler.js
+//   onTurnDone()                          — defined below; the WHOLE turn is done (all
+//                                            expected pools completed), resets Send/isGenerating
 //   updateIndexStatus(msg)
 //   clearIndexStatus()
 
+// Split-bubble redesign (reactive-coalescing-thimble plan, 2026-08-30): a
+// turn can produce 0-2 independently-timed bubbles (one per pool). Per-bubble
+// finalize (chat-handler.js) no longer flips isGenerating/setSendState —
+// only onTurnDone does, fired once by Xojo's real OnDone when ALL expected
+// pools for the turn have completed. See XDOXSession.FinishTurn's comment
+// for why Send deliberately stays disabled until then, not after the first
+// bubble.
 let isGenerating = false;
 let lastUserMessage = '';
 
@@ -17,26 +26,9 @@ function postToXojo(handler, body) {
   }
 }
 
-// ── Wrappers so Xojo can call finalizeMessage / showError and also reset UI ──
-
-var _chatHandlerFinalizeMessage = null;
-var _chatHandlerShowError = null;
-
-function _initWrappers() {
-  _chatHandlerFinalizeMessage = finalizeMessage;
-  _chatHandlerShowError = showError;
-
-  finalizeMessage = function() {
-    _chatHandlerFinalizeMessage();
-    isGenerating = false;
-    setSendState(false);
-  };
-
-  showError = function(message) {
-    _chatHandlerShowError(message);
-    isGenerating = false;
-    setSendState(false);
-  };
+function onTurnDone() {
+  isGenerating = false;
+  setSendState(false);
 }
 
 // ── User actions ──────────────────────────────────────────────────────────
@@ -52,7 +44,19 @@ function sendMessage() {
   lastUserMessage = text;
 
   showUserMessage(text);
-  showThinkingIndicator();
+
+  // Which pools will actually be searched is known synchronously from the
+  // scope selector's own last-received value (receiveDocsSearchScope keeps
+  // docsScopeSelect's value in sync — see below) — mirrors XDOXSession.
+  // SendMessage computing mExpectedPools from DBHelper.GetDocsSearchScope()
+  // before either worker starts, so the status rows shown here match
+  // exactly which pool(s) Xojo is about to search.
+  const scope = (document.getElementById('docsScopeSelect') || {}).value || 'all';
+  const statuses = [];
+  if (scope !== 'mbs') statuses.push({ pool: 'native', text: 'Searching Xojo docs…' });
+  if (scope !== 'native') statuses.push({ pool: 'mbs', text: 'Searching MBS docs…' });
+  showSearchStatus(statuses);
+
   setSendState(true);
   isGenerating = true;
 
@@ -261,194 +265,77 @@ function setNotesSearchScope(scope) {
   postToXojo('setNotesSearchScope', scope);
 }
 
+// ── Docs search scope ─────────────────────────────────────────────────────
+// 'all' searches both Xojo and MBS docs; 'native'/'mbs' restrict to one
+// source. Xojo persists the choice in DB metadata.
+
+function receiveDocsSearchScope(scope) {
+  const sel = document.getElementById('docsScopeSelect');
+  if (sel) sel.value = scope || 'all';
+}
+
+function setDocsSearchScope(scope) {
+  // Old bubbles were computed under the PREVIOUS scope (e.g. a "both
+  // sources" turn from before switching to "MBS only") — leaving them
+  // visible reads as if the new scope still applies to them. Clearing on
+  // every switch, not just when it would visibly matter, keeps this simple
+  // and predictable rather than trying to guess which past turns are still
+  // valid under the new scope. Reuses clearChat's own isGenerating guard —
+  // switching scope mid-search doesn't cancel the in-flight search itself
+  // (docs_search_scope is only read at the START of a new SendMessage), it
+  // just declines to also wipe the chat while a turn is still rendering.
+  clearChat();
+  postToXojo('setDocsSearchScope', scope);
+}
+
 // ── Backend / model management ────────────────────────────────────────────
-// Xojo calls: receiveBackendState(state, detail), receiveCatalog(catalog,
-// installed, selectedId), receiveDownloadProgress(id, pct),
-// receiveDownloadDone(id, ok, err), receiveEmbedCrashed()
+// Xojo calls: receiveModelStatus(embedNeeded, rerankNeeded) once at startup,
+// receiveDownloadProgress(id, pct), receiveDownloadDone(id, ok, err),
+// receiveEmbedCrashed(). XDOX only ever downloads two fixed models — the
+// search (embedding) model and the reranker — never a user-chosen one.
 
-let modelCatalog = [];
-let modelInstalled = {};
-let selectedModelId = '';
-let modelDownloads = {};   // id -> pct
-let overlayAutoOpened = false;
 let embedDownloading = false;  // fixed search model (id 'embedding') in flight
-
-function setBackendStatus(text, cls) {
-  const el = document.getElementById('backendStatus');
-  if (!el) return;
-  el.textContent = text;
-  el.className = 'backend-status' + (cls ? ' ' + cls : '');
-}
-
-function receiveBackendState(state, detail) {
-  switch (state) {
-    case 'no-model':
-      setBackendStatus('No model installed', 'error');
-      openModelOverlay(true);
-      break;
-    case 'not-downloaded':
-      setBackendStatus('Model not downloaded', 'error');
-      openModelOverlay(true);
-      break;
-    case 'loading':
-      setBackendStatus('Loading model…', '');
-      break;
-    case 'ready':
-      setBackendStatus('● Model ready', 'ready');
-      if (overlayAutoOpened) closeModelOverlay();
-      break;
-    case 'crashed':
-      setBackendStatus('Model crashed', 'error');
-      showToast('The model server stopped unexpectedly.');
-      break;
-    case 'port-conflict':
-      setBackendStatus('Port conflict', 'error');
-      showToast(detail || 'Another app is using the model port.');
-      break;
-    case 'error':
-      setBackendStatus('Model error', 'error');
-      showToast(detail || 'The model could not be started.');
-      break;
-  }
-}
+let rerankDownloading = false; // fixed reranker model (id 'reranker') in flight
+// Tracks which fixed models are still outstanding so the combined disclosure
+// banner only hides once BOTH are confirmed installed, regardless of which
+// download happens to finish first.
+let embedModelDone = false;
+let rerankModelDone = false;
 
 function receiveEmbedCrashed() {
   showToast('Semantic search stopped unexpectedly — falling back to keyword search.');
 }
 
-function openModelOverlay(auto) {
-  overlayAutoOpened = !!auto;
-  const ov = document.getElementById('modelOverlay');
-  if (ov) ov.style.display = '';
-  postToXojo('getModels', '');
+// Xojo calls this once at startup (from AutoStart) so the disclosure banner
+// reflects reality on relaunch instead of always assuming a fresh install.
+function receiveModelStatus(embedNeeded, rerankNeeded) {
+  embedModelDone = !embedNeeded;
+  rerankModelDone = !rerankNeeded;
+  updateEmbedBanner();
 }
 
-function closeModelOverlay() {
-  const ov = document.getElementById('modelOverlay');
-  if (ov) ov.style.display = 'none';
-  overlayAutoOpened = false;
-}
-
-function receiveCatalog(catalog, installed, selectedId, embedNeeded) {
-  modelCatalog = catalog || [];
-  modelInstalled = installed || {};
-  selectedModelId = selectedId || '';
-  updateEmbedNote(!!embedNeeded);
-  renderModelList();
-}
-
-// One-time disclosure: the first chat-model choice also triggers the fixed
-// search-model download. Hidden once that model is on disk.
-function updateEmbedNote(needed) {
-  const note = document.getElementById('embedNote');
-  if (!note) return;
-  if (needed) {
-    note.textContent = 'First-time setup: along with your chat model, XDOX '
-      + 'downloads a small search model (nomic-embed-text, 146 MB) that powers '
-      + 'semantic search. This happens only once — later launches download nothing.';
-    note.style.display = '';
+// One-time disclosure: on first launch XDOX downloads two fixed models that
+// power search. Non-modal — nothing to choose, so nothing blocks on it.
+// Hidden once BOTH are on disk — tracked separately (embedModelDone/
+// rerankModelDone) so whichever of the two finishes first doesn't
+// prematurely hide the banner while the other is still missing.
+function updateEmbedBanner() {
+  const banner = document.getElementById('embedBanner');
+  if (!banner) return;
+  if (!embedModelDone || !rerankModelDone) {
+    banner.textContent = 'XDOX runs local AI models on your Mac — nothing leaves your machine. '
+      + 'First-time setup downloads two fixed models that power search — a search model '
+      + '(nomic-embed-text, 146 MB) and a reranker (Qwen3-Reranker-4B, 4.3 GB). '
+      + 'This happens only once — later launches download nothing.';
+    banner.style.display = '';
   } else {
-    note.style.display = 'none';
+    banner.style.display = 'none';
   }
 }
 
-function formatGB(bytes) {
-  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-}
-
-function renderModelList() {
-  const list = document.getElementById('modelList');
-  if (!list) return;
-  list.innerHTML = '';
-  modelCatalog.forEach((m) => {
-    const card = document.createElement('div');
-    card.className = 'model-card' + (m.id === selectedModelId ? ' selected' : '');
-
-    const info = document.createElement('div');
-    info.className = 'model-card-info';
-    const name = document.createElement('div');
-    name.className = 'model-card-name';
-    name.textContent = m.name;
-    if (m.recommended) {
-      const badge = document.createElement('span');
-      badge.className = 'model-badge';
-      badge.textContent = 'Recommended';
-      name.appendChild(badge);
-    }
-    const desc = document.createElement('div');
-    desc.className = 'model-card-desc';
-    desc.textContent = m.description;
-    const meta = document.createElement('div');
-    meta.className = 'model-card-meta';
-    meta.textContent = formatGB(m.bytes) + ' download · ' + m.ram + ' RAM';
-    info.appendChild(name);
-    info.appendChild(desc);
-    info.appendChild(meta);
-
-    const action = document.createElement('div');
-    action.className = 'model-card-action';
-
-    if (m.id in modelDownloads) {
-      const bar = document.createElement('div');
-      bar.className = 'model-progress';
-      const fill = document.createElement('div');
-      fill.className = 'model-progress-fill';
-      fill.id = 'modelProgress-' + m.id;
-      fill.style.width = (modelDownloads[m.id] || 0) + '%';
-      bar.appendChild(fill);
-      const cancel = document.createElement('button');
-      cancel.className = 'model-btn secondary';
-      cancel.textContent = 'Cancel';
-      cancel.onclick = () => cancelModelDownload(m.id);
-      action.appendChild(bar);
-      action.appendChild(cancel);
-    } else if (modelInstalled[m.id]) {
-      if (m.id === selectedModelId) {
-        const label = document.createElement('div');
-        label.className = 'model-selected-label';
-        label.textContent = '✓ In use';
-        action.appendChild(label);
-      } else {
-        const use = document.createElement('button');
-        use.className = 'model-btn';
-        use.textContent = 'Use';
-        use.onclick = () => selectModel(m.id);
-        action.appendChild(use);
-      }
-    } else {
-      const dl = document.createElement('button');
-      dl.className = 'model-btn';
-      dl.textContent = 'Download';
-      dl.onclick = () => downloadModel(m.id);
-      action.appendChild(dl);
-    }
-
-    card.appendChild(info);
-    card.appendChild(action);
-    list.appendChild(card);
-  });
-}
-
-function downloadModel(id) {
-  modelDownloads[id] = 0;
-  renderModelList();
-  setBackendStatus('Downloading model…', '');
-  postToXojo('downloadModel', id);
-}
-
-function cancelModelDownload(id) {
-  postToXojo('cancelDownload', id);
-}
-
-function selectModel(id) {
-  selectedModelId = id;
-  renderModelList();
-  postToXojo('selectModel', id);
-}
-
 function receiveDownloadProgress(id, pct) {
-  // The fixed search model has no catalog card — its progress lives in the
-  // status bar's search-tier slot instead.
+  // Only ever 'embedding' or 'reranker' — the fixed models — and both
+  // report into the status bar's search-tier slot.
   if (id === 'embedding') {
     embedDownloading = true;
     const el = document.getElementById('semanticStatus');
@@ -458,9 +345,18 @@ function receiveDownloadProgress(id, pct) {
     }
     return;
   }
-  modelDownloads[id] = pct;
-  const fill = document.getElementById('modelProgress-' + id);
-  if (fill) fill.style.width = pct + '%';
+  if (id === 'reranker') {
+    rerankDownloading = true;
+    const el = document.getElementById('semanticStatus');
+    // Don't stomp the embedding model's own progress text if both happen to
+    // be downloading at once — whichever posts last wins the slot, which is
+    // harmless since both resolve to the same "warming up" toast.
+    if (el) {
+      el.textContent = 'Downloading reranker… ' + Math.round(pct) + '%';
+      el.className = 'semantic-status';
+    }
+    return;
+  }
 }
 
 // Search tier indicator: 'semantic' (hybrid, embedding server up) or
@@ -469,7 +365,7 @@ function receiveSemanticState(state) {
   const el = document.getElementById('semanticStatus');
   if (!el) return;
   // Don't let a keyword-tier ping wipe the download progress text.
-  if (state !== 'semantic' && embedDownloading) return;
+  if (state !== 'semantic' && (embedDownloading || rerankDownloading)) return;
   if (state === 'semantic') {
     el.textContent = 'Semantic search';
     el.className = 'semantic-status ready';
@@ -480,12 +376,12 @@ function receiveSemanticState(state) {
 }
 
 function receiveDownloadDone(id, ok, err) {
-  // The search model must never fall through to the chat-model logic below —
-  // it finishes first (it is far smaller) and would get auto-selected.
+  // Only ever 'embedding' or 'reranker' — the fixed models.
   if (id === 'embedding') {
     embedDownloading = false;
     if (ok) {
-      updateEmbedNote(false);
+      embedModelDone = true;
+      updateEmbedBanner();
       showToast('Search model installed — semantic search is warming up');
     } else {
       const el = document.getElementById('semanticStatus');
@@ -494,23 +390,38 @@ function receiveDownloadDone(id, ok, err) {
     }
     return;
   }
-  delete modelDownloads[id];
-  if (ok) {
-    modelInstalled[id] = true;
-    showToast('Download complete');
-    // First model in — put it to use right away.
-    if (!selectedModelId) { selectModel(id); return; }
-  } else if (err && err !== 'cancelled') {
-    setBackendStatus('Download failed', 'error');
-    showToast('Download failed: ' + err);
+  if (id === 'reranker') {
+    rerankDownloading = false;
+    if (ok) {
+      rerankModelDone = true;
+      updateEmbedBanner();
+      showToast('Reranker installed — retrieval quality is improving');
+    } else {
+      if (err && err !== 'cancelled') showToast('Reranker download failed: ' + err);
+    }
+    return;
   }
-  renderModelList();
 }
+
+// ── Link handling ────────────────────────────────────────────────────────
+// Chat/note content renders <a href> links (sanitize.js allows the tag and
+// forces target="_blank" as a defence-in-depth default), but this is a
+// WKWebView, not a real browser tab strip — target="_blank" alone has no
+// reliable "open in the user's actual default browser" behavior here.
+// Delegate every link click in the chat area to Xojo's openURL bridge
+// handler (ChatView.xojo_code's didReceiveScriptMessage, which calls
+// ShowURL) instead, same mechanism already used for other Xojo-side actions.
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('a[href]');
+  if (!link) return;
+  if (!document.getElementById('chatArea')?.contains(link)) return;
+  e.preventDefault();
+  postToXojo('openURL', link.getAttribute('href'));
+});
 
 // ── Init ──────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  _initWrappers();
   restoreSidebarState();
   postToXojo('pageReady', '');
 });

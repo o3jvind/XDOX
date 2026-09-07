@@ -55,13 +55,87 @@ Public Class RSTParser
 		  App.AppendDebugLog("RSTParser: Found " + pageStarts.Count.ToString + " pages (h1 sections)." + EndOfLine)
 
 		  Var pageCount As Integer = pageStarts.LastIndex
-		  For pi As Integer = 0 To pageCount
+		  If pageCount < 0 Then Return chunks
+
+		  // Split the pi=0..pageCount range into System.CoreCount contiguous
+		  // slices — not round-robin — so each worker's ResultChunks() is
+		  // already in original page order and the merge below is a plain
+		  // index-ordered concatenation with no re-sorting needed.
+		  Var pageTotal As Integer = pageCount + 1
+		  Var workerCount As Integer = System.CoreCount
+		  If workerCount > pageTotal Then workerCount = pageTotal
+		  If workerCount < 1 Then workerCount = 1
+
+		  Var workers() As RSTPageWorker
+		  Var baseSize As Integer = pageTotal \ workerCount
+		  Var remainder As Integer = pageTotal Mod workerCount
+		  Var startPi As Integer = 0
+		  For w As Integer = 0 To workerCount - 1
+		    Var sliceSize As Integer = baseSize
+		    If w < remainder Then sliceSize = sliceSize + 1
+		    If sliceSize = 0 Then Continue
+		    Var worker As New RSTPageWorker
+		    worker.Lines = lines
+		    worker.PageStarts = pageStarts
+		    worker.PageTitles = pageTitles
+		    worker.TitleCounts = titleCounts
+		    worker.LastLineIndex = lastCount
+		    worker.PageIndexFrom = startPi
+		    worker.PageIndexTo = startPi + sliceSize - 1
+		    workers.Add(worker)
+		    startPi = startPi + sliceSize
+		    worker.Start
+		  Next
+
+		  // No blocking Join exists for preemptive Threads — poll ThreadState
+		  // instead. Safe to sleep this call's own thread (IndexerThread)
+		  // while waiting, since it isn't the main/UI thread.
+		  Var allDone As Boolean = False
+		  While Not allDone
+		    allDone = True
+		    For Each worker As RSTPageWorker In workers
+		      If worker.ThreadState <> Thread.ThreadStates.NotRunning Then
+		        allDone = False
+		        Exit
+		      End If
+		    Next
+		    If Not allDone Then Thread.SleepCurrent(20)
+		  Wend
+
+		  For Each worker As RSTPageWorker In workers
+		    For Each c As DocChunk In worker.ResultChunks
+		      chunks.Add(c)
+		    Next
+		    For Each line As String In worker.LogLines
+		      App.AppendDebugLog(line + EndOfLine)
+		    Next
+		  Next
+
+		  Return chunks
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub ParsePageGroup(lines() As String, pageStarts() As Integer, pageTitles() As String, fromPi As Integer, toPi As Integer, lastLineIndex As Integer, titleCounts As Dictionary, chunks() As DocChunk)
+		  // Entry point for a single RSTPageWorker's page-index slice — the
+		  // same per-pi loop body Parse used to run inline, extracted so it
+		  // can run on a worker Thread instead. ParseAPIClassPage/
+		  // ParseGuidePage/IsAPIClassPage stay Private; this is the only new
+		  // public surface needed to reuse them.
+		  Var pageCount As Integer = pageStarts.LastIndex
+		  For pi As Integer = fromPi To toPi
 		    Var pageLineStart As Integer = pageStarts(pi)
 		    Var pageLineEnd As Integer
 		    If pi < pageCount Then
 		      pageLineEnd = pageStarts(pi + 1) - 1
+		      // Same overline back-up fix as the old inline loop — see
+		      // Parse's history for the "=======================" leak this
+		      // guards against.
+		      If pageLineEnd >= 0 And pageLineEnd <= lastLineIndex And IsUnderline(lines(pageLineEnd).TrimRight, "=") Then
+		        pageLineEnd = pageLineEnd - 1
+		      End If
 		    Else
-		      pageLineEnd = lastCount
+		      pageLineEnd = lastLineIndex
 		    End If
 
 		    Var pageTitle As String = pageTitles(pi)
@@ -72,9 +146,7 @@ Public Class RSTParser
 		      ParseGuidePage(lines, pageLineStart, pageLineEnd, pageTitle, titleCounts, chunks)
 		    End If
 		  Next pi
-
-		  Return chunks
-		End Function
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
@@ -164,6 +236,17 @@ Public Class RSTParser
 		  Var chunkLines() As String
 		  Var inChunk As Boolean = False
 		  Var inDirective As Boolean = False
+		  // Same real ".. code:: xojo" block tracking as ExtractBody (see its
+		  // codeBlockIndent comment for the full rationale) — ParseGuidePage
+		  // is a completely separate code path with its own line-by-line
+		  // scan, so it needs its own copy of this state rather than sharing
+		  // ExtractBody's. Confirmed live, 2026-08-29: without this, guide
+		  // pages (narrative "how to" articles like "HTTP (Web)
+		  // communication") kept showing the raw ".. code:: xojo" directive
+		  // text verbatim in the answer instead of a proper fenced block —
+		  // ExtractBody's fix only ever covered ParseAPIClassPage's chunks.
+		  Var inCodeBlock As Boolean = False
+		  Var codeBlockIndent As Integer = -1
 
 		  Var i As Integer = startLine + 2
 		  While i <= endLine
@@ -184,6 +267,38 @@ Public Class RSTParser
 		        Continue
 		      Else
 		        inDirective = False
+		      End If
+		    End If
+
+		    Var trimmedEarly As String = line.Trim
+		    If trimmedEarly.BeginsWith(".. code") Then
+		      If inCodeBlock And inChunk Then chunkLines.Add(kCodeFenceClose)
+		      inCodeBlock = True
+		      codeBlockIndent = -1
+		      If inChunk Then chunkLines.Add(kCodeFenceOpen)
+		      i = i + 1
+		      Continue
+		    End If
+
+		    If inCodeBlock Then
+		      If line = "" Then
+		        If inChunk Then chunkLines.Add("")
+		        i = i + 1
+		        Continue
+		      Else
+		        Var indent As Integer = LeadingWhitespaceCount(line)
+		        If codeBlockIndent < 0 Then codeBlockIndent = indent
+		        If indent >= codeBlockIndent Then
+		          If inChunk Then chunkLines.Add(line.Trim)
+		          i = i + 1
+		          Continue
+		        Else
+		          inCodeBlock = False
+		          codeBlockIndent = -1
+		          If inChunk Then chunkLines.Add(kCodeFenceClose)
+		          // Fall through — this line is real content (prose, a new
+		          // heading, etc.), handled by the normal logic below.
+		        End If
 		      End If
 		    End If
 
@@ -218,6 +333,8 @@ Public Class RSTParser
 		    If trimmed.BeginsWith(".. _") Or trimmed.BeginsWith(".. toctree") Or _
 		       trimmed.BeginsWith(".. image") Or trimmed.BeginsWith(".. figure") Or _
 		       trimmed.BeginsWith(".. rst-class") Or trimmed.BeginsWith(".. csv-table") Or _
+		       trimmed.BeginsWith(".. seealso::") Or trimmed.BeginsWith(".. note::") Or _
+		       trimmed.BeginsWith(".. warning::") Or trimmed.BeginsWith(".. deprecated::") Or _
 		       trimmed.BeginsWith(":header:") Or trimmed.BeginsWith(":widths:") Then
 		      inDirective = True
 		      i = i + 1
@@ -238,6 +355,11 @@ Public Class RSTParser
 
 		    i = i + 1
 		  Wend
+
+		  // A code block that never got a chance to close inline (page ends
+		  // mid-example) still needs its closing fence — see ExtractBody's
+		  // identical end-of-loop guard for why.
+		  If inCodeBlock And inChunk Then chunkLines.Add(kCodeFenceClose)
 
 		  If inChunk And chunkLines.Count > 0 Then
 		    EmitGuideChunk(pageTitle, currentH2, chunkLines, chunks)
@@ -532,6 +654,22 @@ Public Class RSTParser
 		  Var inDirective As Boolean = False
 		  Var inCodeBlock As Boolean = False
 		  Var blankCount As Integer = 0
+		  // Indent width (raw leading-whitespace char count, BEFORE
+		  // TrimRight/Trim) of the code block's own first non-blank line, set
+		  // once a code block starts. A later line only ends the block if its
+		  // OWN indent is LESS than this — not "any unindented line", which
+		  // is wrong for the API-reference doc format where an entire method
+		  // body (both code AND the prose between multiple .. code:: blocks
+		  // for the same method) is indented at one shared fixed level, e.g.
+		  // 4 spaces; only the next .. code::/.. note:: directive itself
+		  // marks a real prose/code boundary there, not the indent amount.
+		  // Confirmed via a live DB check after this bug shipped once already:
+		  // a "Sends a GET request..." prose sentence sitting between two
+		  // .. code:: blocks (both indented 4 spaces under the method
+		  // signature) got swallowed into the first code fence because it
+		  // was still indented relative to column 0, even though it isn't
+		  // actually more code.
+		  Var codeBlockIndent As Integer = -1
 
 		  For i As Integer = startIdx To endIdx
 		    If i > lines.LastIndex Then Exit
@@ -550,10 +688,13 @@ Public Class RSTParser
 
 		    If trimmed.BeginsWith(".. code") Or trimmed.BeginsWith(".. warning::") Or _
 		       trimmed.BeginsWith(".. note::") Or trimmed.BeginsWith(".. deprecated::") Then
+		      If inCodeBlock Then parts.Add(kCodeFenceClose)
 		      inCodeBlock = False
+		      codeBlockIndent = -1
 		      inDirective = False
 		      If trimmed.BeginsWith(".. code") Then
 		        inCodeBlock = True
+		        parts.Add(kCodeFenceOpen)
 		      End If
 		      Continue
 		    End If
@@ -572,11 +713,39 @@ Public Class RSTParser
 		      If line = "" Then
 		        parts.Add("")
 		        Continue
-		      ElseIf line.Left(1) = " " Or line.Left(1) = Chr(9) Then
-		        parts.Add(line.Trim)
-		        Continue
 		      Else
-		        inCodeBlock = False
+		        Var indent As Integer = LeadingWhitespaceCount(line)
+		        // First non-blank line of this code block sets the reference
+		        // indent — every later line at or above that indent is still
+		        // part of the SAME block; only dropping below it (or hitting
+		        // the next directive, handled above) ends it. This is what
+		        // makes the API-reference format (whole method body, prose
+		        // and code alike, at one shared indent) work: a prose
+		        // sentence between two .. code:: blocks sits at that SAME
+		        // indent, not less, so it must NOT be swallowed as code — but
+		        // it also isn't reached here at all, because the next ..
+		        // code:: directive already closed the previous block above.
+		        // What this guards against is different: a code line itself
+		        // using LESS leading whitespace than the block's own first
+		        // line (rare, but seen with a not-fully-indented continuation
+		        // line) no longer incorrectly ends the block.
+		        If codeBlockIndent < 0 Then codeBlockIndent = indent
+		        If indent >= codeBlockIndent Then
+		          // line.Trim (pre-2026-09-06) discarded the code's OWN
+		          // relative indentation (e.g. a nested If body one level
+		          // deeper than its enclosing block) along with the outer
+		          // .rst-file indentation this block needs stripped. Cutting
+		          // exactly codeBlockIndent leading characters removes only
+		          // the outer wrapper indent and keeps the code's own
+		          // structure intact — same fix applied to MBSDocsetParser's
+		          // <pre>/RB_Code handling the same day, for the same reason.
+		          parts.Add(line.Middle(codeBlockIndent))
+		          Continue
+		        Else
+		          inCodeBlock = False
+		          codeBlockIndent = -1
+		          parts.Add(kCodeFenceClose)
+		        End If
 		      End If
 		    End If
 
@@ -597,6 +766,13 @@ Public Class RSTParser
 		    End If
 		  Next i
 
+		  // A code block that never got a chance to close inline (loop ran out
+		  // of lines while still inCodeBlock — e.g. the body ends mid-example)
+		  // still needs its closing fence, or every subsequent chunk_text
+		  // built from a later page would end up wrapped as "code" too, since
+		  // there'd be an unbalanced opening fence with no matching close.
+		  If inCodeBlock Then parts.Add(kCodeFenceClose)
+
 		  While parts.Count > 0 And parts(0) = ""
 		    parts.RemoveAt(0)
 		  Wend
@@ -605,6 +781,20 @@ Public Class RSTParser
 		  Wend
 
 		  Return Join(parts, EndOfLine)
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function LeadingWhitespaceCount(line As String) As Integer
+		  // Counts leading space/tab characters — used to compare a code-block
+		  // line's own indent against the block's established reference
+		  // indent (see ExtractBody's codeBlockIndent comment), not to strip
+		  // or otherwise interpret the whitespace itself.
+		  Var count As Integer = 0
+		  While count < line.Length And (line.Middle(count, 1) = " " Or line.Middle(count, 1) = Chr(9))
+		    count = count + 1
+		  Wend
+		  Return count
 		End Function
 	#tag EndMethod
 
@@ -689,6 +879,22 @@ Public Class RSTParser
 	#tag EndMethod
 
 	#tag Constant, Name = kMinChunkBodyLength, Type = Integer, Dynamic = False, Default = \"15", Scope = Private
+	#tag EndConstant
+
+	// Mark a real RST ".. code::" block's boundaries in chunk_text so a
+	// downstream consumer (SymbolCheck.ExtractCodeBlocks, and eventually the
+	// UI) can tell actual Xojo code apart from prose without guessing —
+	// previously this distinction, known at parse time, was discarded when
+	// ExtractBody joined code and prose lines into one flat string. Two
+	// separate constants (not one reused both ways) because a fence with a
+	// language tag only makes sense as an opener — a closing fence with
+	// "xojo" trailing it would render wrong if this text is ever shown as
+	// literal Markdown, even though ExtractCodeBlocks itself only looks for
+	// the next bare "```" and would work either way.
+	#tag Constant, Name = kCodeFenceOpen, Type = String, Dynamic = False, Default = \"```xojo", Scope = Public
+	#tag EndConstant
+
+	#tag Constant, Name = kCodeFenceClose, Type = String, Dynamic = False, Default = \"```", Scope = Public
 	#tag EndConstant
 
 End Class

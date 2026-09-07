@@ -37,10 +37,6 @@ Implements IndexerDelegate
 		  Retrieval.ClearCache
 		  Retrieval.NotifySemanticState
 
-		  #If DebugBuild Then
-		    Retrieval.SelfTest
-		  #EndIf
-
 		  // A finished index — additive or reindex — clears any pending banner.
 		  DBHelper.SetMetadata("pending_reindex", "0")
 		  DBHelper.SetMetadata("pending_version", "")

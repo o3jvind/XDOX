@@ -3,6 +3,16 @@ Public Class MBSIndexerThread
 Inherits Thread
 Implements MBSParseProgressDelegate
 
+	#tag Method, Flags = &h0
+		Constructor()
+		  StopEmbeddingRequested = New StopSignal
+		End Constructor
+	#tag EndMethod
+
+	#tag Property, Flags = &h0
+		StopEmbeddingRequested As StopSignal
+	#tag EndProperty
+
 	#tag Property, Flags = &h0
 		DocsetFolder As FolderItem
 	#tag EndProperty
@@ -37,6 +47,25 @@ Implements MBSParseProgressDelegate
 		      AddUserInterfaceUpdate(New Pair("type", "error"), New Pair("msg", "No chunks produced from MBS docset — check it points at a MBS.docset bundle."))
 		      Return
 		    End If
+
+		    // Tag every pre-split chunk with a unique OriginGroupID BEFORE
+		    // Chunker.SplitIfNeeded runs — Chunker copies it onto every
+		    // sub-chunk it produces from a given raw chunk (see Chunker.
+		    // SplitChunk), so DisambiguateSplitSources can tell "these N
+		    // chunks all came from the SAME original page" apart from "these
+		    // N chunks came from DIFFERENT pages that happen to render the
+		    // same Source string" — the second case still needs the
+		    // ContentHash sort even when every individual chunk also
+		    // carries Chunker's own "(part N)" Title suffix (confirmed live,
+		    // 2026-09-07: two distinct pages, plugins-mbsmacframeworksplugin.
+		    // html and plugincontent-mbsmacframeworksplugin.html, both got
+		    // Chunker-split into ~100 parts each under the SAME Source —
+		    // checking only for the Title suffix wrongly treated all ~200
+		    // as one already-stable group and skipped sorting them,
+		    // reintroducing non-determinism this fix was supposed to close).
+		    For i As Integer = 0 To rawChunks.LastIndex
+		      rawChunks(i).OriginGroupID = i
+		    Next
 
 		    Var splitter As New Chunker(kMaxChars, kTargetChars)
 		    Var chunks() As DocChunk = splitter.SplitIfNeeded(rawChunks)
@@ -78,7 +107,7 @@ Implements MBSParseProgressDelegate
 		      + " unchanged (skipped re-embed), " + changedCount.ToString + " new/updated" + EndOfLine)
 
 		    If ModelManager.EmbeddingModelInstalled And WaitForEmbedServer(90) Then
-		      EmbedPendingChunks(db)
+		      Embedder.EmbedPendingChunks(db, Self, DBHelper.kMBSSourcePrefix + "%", StopEmbeddingRequested)
 		    Else
 		      App.AppendDebugLog("MBSIndexerThread: embedding server not ready — skipping embed phase (will resume later)" + EndOfLine)
 		    End If
@@ -137,17 +166,148 @@ Implements MBSParseProgressDelegate
 
 	#tag Method, Flags = &h21
 		Private Sub DisambiguateSplitSources(chunks() As DocChunk)
+		  // Two collision shapes share this one Source-uniqueness pass:
+		  // (1) Chunker's OWN split parts of one oversized page (the case
+		  // this method was originally written for — see its call site's
+		  // comment) — these already arrive in a stable, deterministic
+		  // order relative to each other, since Chunker.SplitChunk itself
+		  // processes one source chunk's paragraphs sequentially.
+		  // (2) UNRELATED pages that merely happen to render the same page
+		  // title — confirmed live, 2026-09-07: 1,747 of this docset's
+		  // 17,103 files share a <TITLE>/<H2> with at least one other file
+		  // (e.g. many FAQ pages all render "<H2>FAQ</H2>" regardless of
+		  // which actual question they answer), so ExtractPageTitle/
+		  // ParseFile legitimately produce the same Source string for
+		  // genuinely different content. THIS group's relative order used
+		  // to depend on chunks()' own arrival order — which changed
+		  // between runs once MBSDocsetParser.Parse switched to the
+		  // pull-based MBSFileQueue (worker completion timing, not a fixed
+		  // per-worker file slice, now decides which file's chunks land in
+		  // the array first). That made the SAME set of colliding pages get
+		  // a DIFFERENT "(part N)" assignment on different runs of the
+		  // identical, unchanged docset — which in turn made
+		  // MBSIndexerThread's content-hash comparison (keyed on Source)
+		  // spuriously flag hundreds of genuinely-unchanged chunks as
+		  // "new" every single reindex, discovered via three back-to-back
+		  // reindexes of the same unmodified docset reporting 3 different
+		  // "new/updated" counts (0-ish expected, got 353 then 229) instead
+		  // of converging to ~0.
+		  //
+		  // Fix (2026-09-07): sort ONLY group (2) — collision groups where
+		  // NO member's Title already carries a Chunker-assigned "(part N)"
+		  // suffix — by ContentHash(ChunkText) before assigning Source's
+		  // "(part N)" suffix, instead of using whatever order chunks()
+		  // happened to arrive in. Group (1) is left on its already-stable
+		  // arrival order, completely untouched.
+		  //
+		  // A FIRST version of this fix (same day) sorted BOTH groups the
+		  // same way — that "fixed" the intended case-(2) bug but broke
+		  // case (1): live-tested and confirmed WORSE, not better —
+		  // "new/updated" jumped to 17,579 (vs. 229-353 before any fix)
+		  // because it silently reassigned Source for ~20,000 already-
+		  // stable Chunker-split chunks that never needed touching. Do NOT
+		  // repeat that mistake — the two collision shapes are NOT
+		  // interchangeable and must be told apart (via the Title "(part N)"
+		  // check below) before deciding whether to touch a group's
+		  // ordering at all.
 		  Var counts As New Dictionary
 		  For Each c As DocChunk In chunks
 		    counts.Value(c.Source) = counts.Lookup(c.Source, 0).IntegerValue + 1
 		  Next
-		  Var seen As New Dictionary
+
+		  Var collidingSources As New Dictionary
+		  For Each key As Variant In counts.Keys
+		    If counts.Value(key).IntegerValue > 1 Then collidingSources.Value(key) = True
+		  Next
+		  If collidingSources.KeyCount = 0 Then Return
+
+		  // Group colliding chunks by Source. Dictionary values can't hold a
+		  // DocChunk() array directly as a mutable-in-place Variant, so each
+		  // group is a small wrapper class (ChunkGroup) instead — simpler
+		  // than fighting Variant/array boxing here for what's always a
+		  // handful of items per group (largest observed: 13 FAQ pages).
+		  Var groups As New Dictionary
 		  For Each c As DocChunk In chunks
-		    If counts.Value(c.Source).IntegerValue > 1 Then
-		      Var n As Integer = seen.Lookup(c.Source, 0).IntegerValue + 1
-		      seen.Value(c.Source) = n
-		      c.Source = c.Source + " (part " + n.ToString + ")"
+		    If Not collidingSources.HasKey(c.Source) Then Continue
+		    Var grp As ChunkGroup
+		    If groups.HasKey(c.Source) Then
+		      grp = groups.Value(c.Source)
+		    Else
+		      grp = New ChunkGroup
+		      groups.Value(c.Source) = grp
 		    End If
+		    grp.Items.Add(c)
+		  Next
+
+		  For Each key As Variant In groups.Keys
+		    Var grp As ChunkGroup = groups.Value(key)
+		    Var sortedItems() As DocChunk = grp.Items
+
+		    // Tell the two collision shapes apart: if EVERY member already
+		    // carries Chunker's own "(part N)" Title suffix, this group is
+		    // case (1) — Chunker's own split of one oversized page, already
+		    // in a stable, meaningful order (the order the original page's
+		    // paragraphs actually appeared in) that must NOT be touched.
+		    // Only a group where at least one member has NO such suffix is
+		    // case (2) — a genuine cross-file title collision — and needs
+		    // the ContentHash sort below to make its ordering reproducible.
+		    // A Title "(part N)" suffix ALONE is not enough to prove "this
+		    // whole group is one page's own split" — confirmed live,
+		    // 2026-09-07: plugins-mbsmacframeworksplugin.html and
+		    // plugincontent-mbsmacframeworksplugin.html are two DIFFERENT
+		    // pages that both render the same overview text and BOTH get
+		    // Chunker-split into ~100 parts each, landing in the same
+		    // Source-collision group — every one of those ~200 sub-chunks
+		    // carries a "(part N)" Title suffix, so the earlier Title-only
+		    // check wrongly treated the whole combined group as "already
+		    // stable" and skipped sorting, which is exactly the non-
+		    // determinism this fix exists to remove (their relative order
+		    // still depends on which worker parsed which file first).
+		    // OriginGroupID (set once per raw chunk in MBSIndexerThread.Run,
+		    // BEFORE Chunker.SplitIfNeeded, and copied onto every sub-chunk
+		    // by Chunker.SplitChunk) is the real test: only skip sorting
+		    // when EVERY member of this Source-collision group traces back
+		    // to the SAME original raw chunk.
+		    Var allAlreadyChunkerSplit As Boolean = True
+		    Var firstOriginGroupID As Integer = sortedItems(0).OriginGroupID
+		    For Each item As DocChunk In sortedItems
+		      If item.OriginGroupID <> firstOriginGroupID Then
+		        allAlreadyChunkerSplit = False
+		        Exit
+		      End If
+		    Next
+		    If allAlreadyChunkerSplit Then
+		      For n As Integer = 0 To sortedItems.LastIndex
+		        Var partNum As Integer = n + 1
+		        sortedItems(n).Source = sortedItems(n).Source + " (part " + partNum.ToString + ")"
+		      Next
+		      Continue
+		    End If
+
+		    // SortWith against a parallel key array — the documented
+		    // technique for sorting a class array (Array.Sort takes a
+		    // comparison delegate instead; either works, SortWith was
+		    // simpler to reason about here). sortKeys must be built from
+		    // the SAME group before sorting since SortWith reorders both
+		    // arrays together in lockstep.
+		    //
+		    // Sort key is ContentHash(item.ChunkText), not the raw text —
+		    // Xojo's String comparison operators are case-INSENSITIVE by
+		    // default (CLAUDE.md's documented "'d' >= 'A'" pitfall), which
+		    // could make two chunks whose text differs only in case compare
+		    // as equal and land in an unstable relative order, reintroducing
+		    // the exact non-determinism this fix exists to remove. A SHA-256
+		    // hex digest (already lowercase-only hex via ContentHash) has no
+		    // case ambiguity to exploit.
+		    Var sortKeys() As String
+		    For Each item As DocChunk In sortedItems
+		      sortKeys.Add(ContentHash(item.ChunkText))
+		    Next
+		    sortKeys.SortWith(sortedItems)
+		    For n As Integer = 0 To sortedItems.LastIndex
+		      Var partNum As Integer = n + 1
+		      sortedItems(n).Source = sortedItems(n).Source + " (part " + partNum.ToString + ")"
+		    Next
 		  Next
 		End Sub
 	#tag EndMethod
@@ -162,90 +322,6 @@ Implements MBSParseProgressDelegate
 		End Function
 	#tag EndMethod
 
-	#tag Method, Flags = &h21
-		Private Sub EmbedPendingChunks(db As SQLiteDatabase)
-		  // Identical batching/retry/failure-cap strategy as
-		  // IndexerThread.EmbedPendingChunks, scoped to MBS chunks only so a
-		  // concurrent Xojo-doc reindex (guarded out by IsRunning anyway) can
-		  // never interleave with this transaction.
-		  If db = Nil Then Return
-		  Var total As Integer = PendingMBSEmbedCount(db)
-		  If total = 0 Then Return
-		  AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", 0), New Pair("total", total))
-
-		  Var done As Integer = 0
-		  Var consecutiveFailures As Integer = 0
-		  While True
-		    Var ids() As Integer
-		    Var texts() As String
-		    Var rs As RowSet = db.SelectSQL("SELECT id, chunk_text FROM chunks WHERE embedded=0 AND source LIKE ? LIMIT " _
-		      + Embedder.kBatchSize.ToString, DBHelper.kMBSSourcePrefix + "%")
-		    While Not rs.AfterLastRow
-		      ids.Add(rs.Column("id").IntegerValue)
-		      texts.Add(rs.Column("chunk_text").StringValue)
-		      rs.MoveToNextRow
-		    Wend
-		    rs.Close
-		    If ids.Count = 0 Then Exit
-
-		    Var embs() As MemoryBlock = Embedder.EmbedBatch(texts, Embedder.kTaskPrefixDocument)
-		    If embs.Count = 0 Then
-		      consecutiveFailures = consecutiveFailures + 1
-		      If consecutiveFailures >= 5 Then
-		        App.AppendDebugLog("MBSIndexerThread: 5 consecutive embed batch failures — aborting embed phase (" _
-		          + PendingMBSEmbedCount(db).ToString + " chunks left pending)" + EndOfLine)
-		        Exit
-		      End If
-		      db.BeginTransaction
-		      mTransactionOpen = True
-		      For k As Integer = 0 To ids.LastIndex
-		        Var single As MemoryBlock = Embedder.FetchEmbedding(texts(k), Embedder.kTaskPrefixDocument, 30)
-		        If single <> Nil Then
-		          DBHelper.StoreChunkEmbedding(ids(k), single, db)
-		        Else
-		          db.ExecuteSQL("UPDATE chunks SET embedded=-1 WHERE id=?", ids(k))
-		        End If
-		      Next
-		      db.CommitTransaction
-		      mTransactionOpen = False
-		      done = done + ids.Count
-		      Continue
-		    End If
-		    consecutiveFailures = 0
-
-		    db.BeginTransaction
-		    mTransactionOpen = True
-		    For k As Integer = 0 To ids.LastIndex
-		      If k <= embs.LastIndex And embs(k) <> Nil Then
-		        DBHelper.StoreChunkEmbedding(ids(k), embs(k), db)
-		      Else
-		        db.ExecuteSQL("UPDATE chunks SET embedded=-1 WHERE id=?", ids(k))
-		      End If
-		    Next
-		    db.CommitTransaction
-		    mTransactionOpen = False
-
-		    done = done + ids.Count
-		    If done Mod 500 < ids.Count Then
-		      AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", done), New Pair("total", total))
-		    End If
-		  Wend
-		  AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", total), New Pair("total", total))
-		End Sub
-	#tag EndMethod
-
-	#tag Method, Flags = &h21
-		Private Function PendingMBSEmbedCount(db As SQLiteDatabase) As Integer
-		  Try
-		    Var rs As RowSet = db.SelectSQL("SELECT COUNT(*) AS n FROM chunks WHERE embedded=0 AND source LIKE ?", DBHelper.kMBSSourcePrefix + "%")
-		    Var n As Integer = rs.Column("n").IntegerValue
-		    rs.Close
-		    Return n
-		  Catch e As DatabaseException
-		    Return 0
-		  End Try
-		End Function
-	#tag EndMethod
 
 	#tag Method, Flags = &h21
 		Private Function WaitForEmbedServer(graceSeconds As Integer) As Boolean

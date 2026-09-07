@@ -2,6 +2,16 @@
 Public Class IndexerThread
 Inherits Thread
 
+	#tag Method, Flags = &h0
+		Constructor()
+		  StopEmbeddingRequested = New StopSignal
+		End Constructor
+	#tag EndMethod
+
+	#tag Property, Flags = &h0
+		StopEmbeddingRequested As StopSignal
+	#tag EndProperty
+
 	#tag Property, Flags = &h0
 		DocsFile As FolderItem
 	#tag EndProperty
@@ -45,7 +55,7 @@ Inherits Thread
 		    End If
 
 		    If EmbedOnly Then
-		      EmbedPendingChunks(db)
+		      Embedder.EmbedPendingChunks(db, Self, "", StopEmbeddingRequested)
 		      db.Close
 		      AddUserInterfaceUpdate(New Pair("type", "complete"), New Pair("isReindex", False))
 		      Return
@@ -142,12 +152,12 @@ Inherits Thread
 		    // Embedding phase. The embed server is started by ModelManager.AutoStart
 		    // (main thread); it may still be warming up, so wait with a grace
 		    // period — but only if the model is on disk at all. On first run the
-		    // download is deferred until the user picks a chat model, so probing
-		    // would just burn 90 s raising connection-refused exceptions. Either
-		    // way the index is complete and usable BM25-only — pending rows are
-		    // embedded later by the resume pass.
+		    // fixed embedding model is still downloading in the background, so
+		    // probing would just burn 90 s raising connection-refused exceptions.
+		    // Either way the index is complete and usable BM25-only — pending
+		    // rows are embedded later by the resume pass.
 		    If ModelManager.EmbeddingModelInstalled And WaitForEmbedServer(90) Then
-		      EmbedPendingChunks(db)
+		      Embedder.EmbedPendingChunks(db, Self, "", StopEmbeddingRequested)
 		    Else
 		      App.AppendDebugLog("IndexerThread: embedding server not ready — skipping embed phase (will resume later)" + EndOfLine)
 		    End If
@@ -194,78 +204,6 @@ Inherits Thread
 		  Next
 		End Sub
 	#tag EndEvent
-
-	#tag Method, Flags = &h21
-		Private Sub EmbedPendingChunks(db As SQLiteDatabase)
-		  If db = Nil Then Return
-		  Var total As Integer = DBHelper.PendingEmbedCount(db)
-		  If total = 0 Then Return
-		  AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", 0), New Pair("total", total))
-
-		  Var done As Integer = 0
-		  Var consecutiveFailures As Integer = 0
-		  While True
-		    Var ids() As Integer
-		    Var texts() As String
-		    Var rs As RowSet = db.SelectSQL("SELECT id, chunk_text FROM chunks WHERE embedded=0 LIMIT " + Embedder.kBatchSize.ToString)
-		    While Not rs.AfterLastRow
-		      ids.Add(rs.Column("id").IntegerValue)
-		      texts.Add(rs.Column("chunk_text").StringValue)
-		      rs.MoveToNextRow
-		    Wend
-		    rs.Close
-		    If ids.Count = 0 Then Exit
-
-		    Var embs() As MemoryBlock = Embedder.EmbedBatch(texts, Embedder.kTaskPrefixDocument)
-		    If embs.Count = 0 Then
-		      // Whole batch failed — likely one oversized/poisonous input. Retry
-		      // each chunk individually so one bad chunk doesn't sink seven good
-		      // ones; only the actual offender gets marked failed.
-		      consecutiveFailures = consecutiveFailures + 1
-		      If consecutiveFailures >= 5 Then
-		        App.AppendDebugLog("IndexerThread: 5 consecutive embed batch failures — aborting embed phase (" _
-		          + DBHelper.PendingEmbedCount(db).ToString + " chunks left pending)" + EndOfLine)
-		        Exit
-		      End If
-		      db.BeginTransaction
-		      mTransactionOpen = True
-		      For k As Integer = 0 To ids.LastIndex
-		        Var single As MemoryBlock = Embedder.FetchEmbedding(texts(k), Embedder.kTaskPrefixDocument, 30)
-		        If single <> Nil Then
-		          DBHelper.StoreChunkEmbedding(ids(k), single, db)
-		        Else
-		          // Mark permanently failed — leaving it at 0 would loop forever.
-		          db.ExecuteSQL("UPDATE chunks SET embedded=-1 WHERE id=?", ids(k))
-		        End If
-		      Next
-		      db.CommitTransaction
-		      mTransactionOpen = False
-		      done = done + ids.Count
-		      Continue
-		    End If
-		    consecutiveFailures = 0
-
-		    db.BeginTransaction
-		    mTransactionOpen = True
-		    For k As Integer = 0 To ids.LastIndex
-		      If k <= embs.LastIndex And embs(k) <> Nil Then
-		        DBHelper.StoreChunkEmbedding(ids(k), embs(k), db)
-		      Else
-		        // Mark permanently failed — leaving it at 0 would loop forever.
-		        db.ExecuteSQL("UPDATE chunks SET embedded=-1 WHERE id=?", ids(k))
-		      End If
-		    Next
-		    db.CommitTransaction
-		    mTransactionOpen = False
-
-		    done = done + ids.Count
-		    If done Mod 200 < ids.Count Then
-		      AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", done), New Pair("total", total))
-		    End If
-		  Wend
-		  AddUserInterfaceUpdate(New Pair("type", "embed-progress"), New Pair("done", total), New Pair("total", total))
-		End Sub
-	#tag EndMethod
 
 	#tag Method, Flags = &h21
 		Private Function WaitForEmbedServer(graceSeconds As Integer) As Boolean

@@ -60,6 +60,7 @@ Public Class Chunker
 		        newChunk = New DocChunk
 		        newChunk.Title = chunk.Title + " (part " + partNum.ToString + ")"
 		        newChunk.Source = chunk.Source
+		        newChunk.OriginGroupID = chunk.OriginGroupID
 		        newChunk.ChunkText = Join(accumParts, Chr(10) + Chr(10))
 		        result.Add(newChunk)
 		        partNum = partNum + 1
@@ -101,6 +102,7 @@ Public Class Chunker
 		        newChunk = New DocChunk
 		        newChunk.Title = chunk.Title + " (part " + partNum.ToString + ")"
 		        newChunk.Source = chunk.Source
+		        newChunk.OriginGroupID = chunk.OriginGroupID
 		        If overlapPrefix <> "" Then
 		          newChunk.ChunkText = overlapPrefix.Trim + Chr(10) + Chr(10) + slice.Trim
 		        Else
@@ -118,6 +120,7 @@ Public Class Chunker
 		      newChunk = New DocChunk
 		      newChunk.Title = chunk.Title + " (part " + partNum.ToString + ")"
 		      newChunk.Source = chunk.Source
+		      newChunk.OriginGroupID = chunk.OriginGroupID
 		      newChunk.ChunkText = emittedText
 		      result.Add(newChunk)
 		      partNum = partNum + 1
@@ -151,6 +154,7 @@ Public Class Chunker
 		      newChunk.Title = chunk.Title
 		    End If
 		    newChunk.Source = chunk.Source
+		    newChunk.OriginGroupID = chunk.OriginGroupID
 		    newChunk.ChunkText = Join(accumParts, Chr(10) + Chr(10))
 		    result.Add(newChunk)
 		  End If

@@ -35,6 +35,16 @@ Public Module DBHelper
 		  Try
 		    Var db As New SQLiteDatabase
 		    db.DatabaseFile = f
+		    // Explicit busy-wait timeout (Xojo's own documented default is 10s,
+		    // but a real "database is locked" DatabaseException was observed
+		    // live, 2026-08-30, with 2 concurrent EmbedWorker connections both
+		    // writing — SQLite's busy handler retries internally up to this
+		    // many seconds before giving up, so a more generous value lets a
+		    // second writer's short BeginTransaction/CommitTransaction window
+		    // simply wait its turn instead of erroring out silently (errors
+		    // here are caught-and-logged by callers like StoreChunkEmbedding,
+		    // not surfaced, so a too-short timeout fails quietly).
+		    db.Timeout = 30
 		    db.Connect
 		    db.ExecuteSQL("PRAGMA journal_mode=WAL")
 		    Return db
@@ -335,6 +345,19 @@ Public Module DBHelper
 		  Var indexed() As String = IndexedVersions
 		  If indexed.Count > 0 Then Return indexed(0)
 		  Return ""
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function GetDocsSearchScope() As String
+		  // Which pool(s) XDOXSession.SendMessage starts a ChatPrepThread
+		  // worker for: "all" (default, both), "native" (Xojo docs only), or
+		  // "mbs" (MBS plugin docs only). Read via the shared DB handle even
+		  // from a worker thread — same precedent as GetActiveVersion, safe
+		  // under WAL's concurrent readers.
+		  Var v As String = GetMetadata("docs_search_scope")
+		  If v = "native" Or v = "mbs" Then Return v
+		  Return "all"
 		End Function
 	#tag EndMethod
 

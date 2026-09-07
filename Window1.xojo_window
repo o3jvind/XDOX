@@ -213,6 +213,17 @@ End
 		End Function
 	#tag EndMenuHandler
 
+	#tag MenuHandler
+		Function ToolsReindexNativeDocs() As Boolean Handles ToolsReindexNativeDocs.Action
+		  If Indexer.IsRunning Or MBSIndexer.MBSIsRunning Then
+		    MessageBox("Indexing is already running.")
+		    Return True
+		  End If
+		  App.StartIndexing(True)
+		  Return True
+		End Function
+	#tag EndMenuHandler
+
 	#tag Method, Flags = &h0
 		Sub HideBanner()
 		  BannerBackground.Visible = False

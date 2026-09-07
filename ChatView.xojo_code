@@ -34,15 +34,12 @@ Implements XDOXSessionDelegate
 		    Me.AddScriptMessageHandler("setTheme")
 		    Me.AddScriptMessageHandler("pageReady")
 		    Me.AddScriptMessageHandler("openURL")
-		    Me.AddScriptMessageHandler("getModels")
-		    Me.AddScriptMessageHandler("downloadModel")
-		    Me.AddScriptMessageHandler("cancelDownload")
-		    Me.AddScriptMessageHandler("selectModel")
 		    Me.AddScriptMessageHandler("newNote")
 		    Me.AddScriptMessageHandler("openNote")
 		    Me.AddScriptMessageHandler("deleteNote")
 		    Me.AddScriptMessageHandler("selectDocsVersion")
 		    Me.AddScriptMessageHandler("setNotesSearchScope")
+		    Me.AddScriptMessageHandler("setDocsSearchScope")
 
 		    Me.LoadHTML(html, "https://xdox.local/")
 		  Catch e As RuntimeException
@@ -121,19 +118,6 @@ Implements XDOXSessionDelegate
 		    RefreshSidebar
 		    RefreshVersions
 
-		  Case "getModels"
-		    // 4th arg: does the picker need the one-time embedding-download notice?
-		    EvaluateJavaScript("receiveCatalog(" + ModelManager.CatalogJSON + "," + ModelManager.InstalledModelsJSON + "," + JSONEscape(ModelManager.SelectedModelId) + "," + If(ModelManager.EmbeddingModelInstalled, "false", "true") + ");")
-
-		  Case "downloadModel"
-		    ModelManager.DownloadModel(Body.StringValue)
-
-		  Case "cancelDownload"
-		    ModelManager.CancelDownload(Body.StringValue)
-
-		  Case "selectModel"
-		    ModelManager.SwitchModel(Body.StringValue)
-
 		  Case "selectDocsVersion"
 		    Var v As String = Body.StringValue
 		    If v <> "" And IsIndexedVersion(v) Then
@@ -146,6 +130,11 @@ Implements XDOXSessionDelegate
 		    Var scope As String = Body.StringValue
 		    If scope <> "all" And scope <> "version" Then scope = "all"
 		    DBHelper.SetMetadata("notes_search_scope", scope)
+
+		  Case "setDocsSearchScope"
+		    Var scope As String = Body.StringValue
+		    If scope <> "all" And scope <> "native" And scope <> "mbs" Then scope = "all"
+		    DBHelper.SetMetadata("docs_search_scope", scope)
 
 		  End Select
 		End Sub
@@ -168,19 +157,56 @@ Implements XDOXSessionDelegate
 
 	#tag Method, Flags = &h0
 		Sub OnDone()
-		  EvaluateJavaScript("finalizeMessage()")
+		  // The WHOLE turn is done — every pool that was searched has
+		  // completed (see XDOXSession.FinishTurn) — not just one bubble.
+		  // onTurnDone (main.js) is the one place isGenerating/setSendState
+		  // reset; per-bubble finalize (showCannedResponseForPool) no longer
+		  // touches that state, so Send correctly stays disabled between a
+		  // fast pool's bubble landing and a slower pool's own completion.
+		  EvaluateJavaScript("onTurnDone()")
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub OnError(message As String)
-		  EvaluateJavaScript("showError(" + JSONEscape(message) + ")")
+		Sub OnPoolDone(pool As String)
+		  // Clears this pool's "Searching…" status row — fires regardless of
+		  // whether this pool ended up producing a bubble (see
+		  // XDOXSession.BeginStreamingForPool's comment).
+		  EvaluateJavaScript("removeSearchStatus(" + JSONEscape(pool) + ")")
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub OnToken(TheString As String)
-		  EvaluateJavaScript("appendToken(" + JSONEscape(TheString) + ")")
+		Sub OnCannedResponse(pool As String, text As String)
+		  // XDOXSession no longer calls the chat-completion model at all
+		  // (2026-08-29 redesign — see its PrepareRequest comment): every
+		  // reply, matched-documentation or no-match alike, renders through
+		  // this single atomic JS call rather than token-by-token streaming.
+		  // showCannedResponseForPool's own comment has the original
+		  // race-condition rationale for why append+finalize must happen as
+		  // one call, and why that doesn't extend to two DIFFERENT pools'
+		  // independently-timed calls.
+		  EvaluateJavaScript("showCannedResponseForPool(" + JSONEscape(pool) + "," + JSONEscape(text) + ")")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub OnPoolNoMatch(pool As String)
+		  // This pool's own search came up empty — surfaced immediately
+		  // where its "Searching…" status row was (OnPoolDone already
+		  // cleared that row just before this call — see XDOXSession.
+		  // BeginStreamingForPool), not held back until the whole turn
+		  // finishes. Confirmed live (2026-08-30) that waiting was itself
+		  // the UX problem: a fast pool's no-match being invisible for
+		  // however long the OTHER pool kept searching read as broken, not
+		  // as "that source had no answer, still waiting on the other."
+		  EvaluateJavaScript("showNoMatchForPool(" + JSONEscape(pool) + ")")
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Sub OnError(pool As String, message As String)
+		  EvaluateJavaScript("showError(" + JSONEscape(pool) + "," + JSONEscape(message) + ")")
 		End Sub
 	#tag EndMethod
 
@@ -234,8 +260,8 @@ Implements XDOXSessionDelegate
 	#tag Method, Flags = &h0
 		Sub RefreshVersions()
 		  // Push the indexed-version list + active version to the JS dropdown. Also
-		  // syncs the notes-search-scope toggle. Call at startup and after any
-		  // (re)index or version cleanup.
+		  // syncs the notes-search-scope and docs-search-scope toggles. Call at
+		  // startup and after any (re)index or version cleanup.
 		  Try
 		    Var arr As New JSONItem("[]")
 		    For Each v As String In DBHelper.IndexedVersions
@@ -246,6 +272,8 @@ Implements XDOXSessionDelegate
 		    Var scope As String = DBHelper.GetMetadata("notes_search_scope")
 		    If scope = "" Then scope = "all"
 		    EvaluateJavaScript("receiveNotesSearchScope(" + JSONEscape(scope) + ");")
+
+		    EvaluateJavaScript("receiveDocsSearchScope(" + JSONEscape(DBHelper.GetDocsSearchScope) + ");")
 		  Catch e As RuntimeException
 		    App.AppendDebugLog("ChatView.RefreshVersions: " + e.Message + EndOfLine)
 		  End Try
