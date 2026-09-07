@@ -32,6 +32,21 @@ Inherits Thread
 		    Var doneCount As Integer = 0
 
 		    While True
+		      // A user-requested stop (IndexProgressWindow's Pause button,
+		      // relayed through StopRequested) is treated exactly like
+		      // "nothing left to claim" — it reuses noMoreClaims rather than
+		      // adding a separate exit path, so the SAME drain-then-exit
+		      // logic below (wait for in-flight batches, write their
+		      // results, then stop once both queues are empty and both
+		      // workers are idle) handles a user-requested stop and a
+		      // naturally-finished run identically. Already-claimed batches
+		      // still get embedded and written — nothing in flight is
+		      // thrown away, only NEW claims stop. Chunks not yet claimed
+		      // stay at embedded=0 and get picked up automatically by the
+		      // next reindex attempt (content-hash caching already skips
+		      // whatever's unchanged, so resuming needs no extra state).
+		      If StopRequested Then noMoreClaims = True
+
 		      // Keep the work queue topped up so both workers always have
 		      // something to chew on, without claiming unboundedly far ahead
 		      // (which would just move contention into "how many rows sit
@@ -113,6 +128,10 @@ Inherits Thread
 		  db.Close
 		End Sub
 	#tag EndEvent
+
+	#tag Property, Flags = &h0
+		StopRequested As Boolean
+	#tag EndProperty
 
 	#tag Property, Flags = &h0
 		SourceFilter As String

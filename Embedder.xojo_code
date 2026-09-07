@@ -188,7 +188,7 @@ Protected Module Embedder
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub EmbedPendingChunks(db As SQLiteDatabase, owner As Thread, sourceFilter As String = "")
+		Sub EmbedPendingChunks(db As SQLiteDatabase, owner As Thread, sourceFilter As String = "", stopSignal As StopSignal = Nil)
 		  // Shared by IndexerThread and MBSIndexerThread (pass kMBSSourcePrefix
 		  // + "%" as sourceFilter for the MBS case). Single-writer queue
 		  // pipeline: one EmbedWriter owns the only DB connection used during
@@ -247,7 +247,18 @@ Protected Module Embedder
 		  // and both queues are empty (see EmbedWriter.Run's termination
 		  // comment), and it sets StopRequested on both workers before
 		  // returning, so they exit their own poll loops right after.
+		  //
+		  // Polls stopSignal (IndexProgressWindow's Pause button, relayed via
+		  // IndexerThread/MBSIndexerThread's own StopEmbeddingRequested
+		  // property — a plain StopSignal object, not an interface method;
+		  // an earlier version of this tried a second Implements interface
+		  // on IndexerThread/MBSIndexerThread for this, which broke passing
+		  // Self as MBSDocsetParser.Parse's MBSParseProgressDelegate
+		  // parameter at runtime — see CLAUDE.md's Xojo file conventions
+		  // section) and relays True into writer.StopRequested the same way
+		  // progress itself is relayed.
 		  While writer.ThreadState <> Thread.ThreadStates.NotRunning
+		    If stopSignal <> Nil And stopSignal.Requested Then writer.StopRequested = True
 		    Thread.SleepCurrent(50)
 		  Wend
 		End Sub

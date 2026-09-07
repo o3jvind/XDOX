@@ -2,6 +2,16 @@
 Public Class IndexerThread
 Inherits Thread
 
+	#tag Method, Flags = &h0
+		Constructor()
+		  StopEmbeddingRequested = New StopSignal
+		End Constructor
+	#tag EndMethod
+
+	#tag Property, Flags = &h0
+		StopEmbeddingRequested As StopSignal
+	#tag EndProperty
+
 	#tag Property, Flags = &h0
 		DocsFile As FolderItem
 	#tag EndProperty
@@ -45,7 +55,7 @@ Inherits Thread
 		    End If
 
 		    If EmbedOnly Then
-		      Embedder.EmbedPendingChunks(db, Self)
+		      Embedder.EmbedPendingChunks(db, Self, "", StopEmbeddingRequested)
 		      db.Close
 		      AddUserInterfaceUpdate(New Pair("type", "complete"), New Pair("isReindex", False))
 		      Return
@@ -147,7 +157,7 @@ Inherits Thread
 		    // Either way the index is complete and usable BM25-only — pending
 		    // rows are embedded later by the resume pass.
 		    If ModelManager.EmbeddingModelInstalled And WaitForEmbedServer(90) Then
-		      Embedder.EmbedPendingChunks(db, Self)
+		      Embedder.EmbedPendingChunks(db, Self, "", StopEmbeddingRequested)
 		    Else
 		      App.AppendDebugLog("IndexerThread: embedding server not ready — skipping embed phase (will resume later)" + EndOfLine)
 		    End If

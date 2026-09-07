@@ -42,6 +42,7 @@ Class=ChatPrepThread;ChatPrepThread.xojo_code;&h000000001A01C001;&h0000000000000
 Class=NoteEmbedThread;NoteEmbedThread.xojo_code;&h000000001A01D001;&h0000000000000000;false
 Class=MBSDocsetParser;MBSDocsetParser.xojo_code;&h000000001A01E001;&h0000000000000000;false
 Class=MBSParseWorker;MBSParseWorker.xojo_code;&h000000001A027001;&h0000000000000000;false
+Class=StopSignal;StopSignal.xojo_code;&h000000001A02D001;&h0000000000000000;false
 Class=MBSIndexerThread;MBSIndexerThread.xojo_code;&h000000001A01F001;&h0000000000000000;false
 Module=MBSIndexer;MBSIndexer.xojo_code;&h000000001A020001;&h0000000000000000;false
 Interface=MBSParseProgressDelegate;MBSParseProgressDelegate.xojo_code;&h000000001A021001;&h0000000000000000;false

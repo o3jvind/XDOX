@@ -10,6 +10,14 @@ Protected Module MBSIndexer
 	#tag EndProperty
 
 	#tag Method, Flags = &h0
+		Sub RequestStopEmbedding()
+		  // See Indexer.RequestStopEmbedding for the full rationale — same
+		  // pattern, mirrored here for the MBS indexing path.
+		  If ActiveThread <> Nil Then ActiveThread.StopEmbeddingRequested.Requested = True
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Sub StartIndex(docsetFolder As FolderItem, progressDelegate As IndexerDelegate)
 		  // Also refuses to start while a Xojo-docs (re)index is running: both
 		  // indexers write chunks through their own connection inside a

@@ -10,6 +10,21 @@ Protected Module Indexer
 	#tag EndProperty
 
 	#tag Method, Flags = &h0
+		Sub RequestStopEmbedding()
+		  // Called from IndexProgressWindow's Pause button. Only meaningful
+		  // during the embed phase — see Embedder.EmbedPendingChunks' own
+		  // polling loop for how this flag actually stops new claims while
+		  // letting in-flight batches finish and write normally. A no-op if
+		  // nothing is running or the active run is still in its parse
+		  // phase (embed hasn't started yet, so there's nothing to stop) —
+		  // ActiveThread being Nil or its own signal simply never being
+		  // polled during parse covers both cases without needing a
+		  // separate phase check here.
+		  If ActiveThread <> Nil Then ActiveThread.StopEmbeddingRequested.Requested = True
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Sub StartIndex(docsFile As FolderItem, progressDelegate As IndexerDelegate, isReindex As Boolean, targetVersion As String = "")
 		  // See MBSIndexer.StartIndex for why the two indexers refuse to run
 		  // concurrently.
