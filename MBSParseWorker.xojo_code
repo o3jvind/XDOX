@@ -20,7 +20,7 @@ Inherits Thread
 		  // MBSDocsetParser.Parse's existing one) is still the normal path.
 		  Try
 		    Var parser As New MBSDocsetParser
-		    parser.ParseFileGroup(Files, Names, AnchorsByFile, EmptyAnchorSet, ResultChunks, LogLines, DoneCount)
+		    parser.ParseFromQueue(Queue, AnchorsByFile, EmptyAnchorSet, ResultChunks, LogLines, DoneCount)
 		  Catch e As RuntimeException
 		    LogLines.Add("MBSParseWorker: worker aborted after exception: " + e.Message)
 		  End Try
@@ -28,19 +28,15 @@ Inherits Thread
 	#tag EndEvent
 
 	#tag Property, Flags = &h0
-		Files() As FolderItem
+		Queue As MBSFileQueue
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
-		Names() As String
+		AnchorsByFile As AtomicDictionaryMBS
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
-		AnchorsByFile As Dictionary
-	#tag EndProperty
-
-	#tag Property, Flags = &h0
-		EmptyAnchorSet As Dictionary
+		EmptyAnchorSet As AtomicDictionaryMBS
 	#tag EndProperty
 
 	#tag Property, Flags = &h0

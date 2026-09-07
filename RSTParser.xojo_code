@@ -731,7 +731,15 @@ Public Class RSTParser
 		        // line) no longer incorrectly ends the block.
 		        If codeBlockIndent < 0 Then codeBlockIndent = indent
 		        If indent >= codeBlockIndent Then
-		          parts.Add(line.Trim)
+		          // line.Trim (pre-2026-09-06) discarded the code's OWN
+		          // relative indentation (e.g. a nested If body one level
+		          // deeper than its enclosing block) along with the outer
+		          // .rst-file indentation this block needs stripped. Cutting
+		          // exactly codeBlockIndent leading characters removes only
+		          // the outer wrapper indent and keeps the code's own
+		          // structure intact — same fix applied to MBSDocsetParser's
+		          // <pre>/RB_Code handling the same day, for the same reason.
+		          parts.Add(line.Middle(codeBlockIndent))
 		          Continue
 		        Else
 		          inCodeBlock = False
