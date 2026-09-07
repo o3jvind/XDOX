@@ -593,17 +593,26 @@ Protected Module ModelManager
 		  // request in flight with no error logged. Slot count 0 (older
 		  // llama-server build, field absent) is treated as "unknown" and does
 		  // NOT force a replace — only a CONFIRMED single-slot server does.
+		  //
+		  // 2026-09-06: slot count is no longer a fixed "2" — ChooseEmbedParallelCount
+		  // sizes it from this machine's RAM (see its own comment). A stale
+		  // server from an EARLIER run on the SAME machine could still be
+		  // running with a stale slot count if RAM usage/availability changed
+		  // between runs (unlikely on a desktop, but not impossible — e.g. a
+		  // VM or hot-added RAM), so the check compares against a freshly
+		  // recomputed target rather than trusting any single fixed number.
+		  Var targetParallel As Integer = ChooseEmbedParallelCount()
 		  Var probe As String = ProbeExistingServerOn(EmbedBaseURL(), modelFi.NativePath)
 		  If probe = "adopt" Then
 		    Var slots As Integer = ProbeSlotCount(EmbedBaseURL())
-		    If ProbeSlotCtx(EmbedBaseURL()) = 8192 And slots <> 1 Then
+		    If ProbeSlotCtx(EmbedBaseURL()) = 8192 And slots = targetParallel Then
 		      mEmbedAdopted = True
 		      App.AppendDebugLog("ModelManager: adopted existing embedding server on port " + kEmbedPort + EndOfLine)
 		      OnEmbedServerBecameReady
 		      StartAdoptedEmbedWatchdog
 		      Return
 		    End If
-		    App.AppendDebugLog("ModelManager: stale embedding server runs the old 2048-token or single-slot regime — replacing it" + EndOfLine)
+		    App.AppendDebugLog("ModelManager: stale embedding server runs the old 2048-token or a mismatched slot-count regime — replacing it" + EndOfLine)
 		    KillAdoptedServer(kEmbedPort)
 		    For i As Integer = 1 To 10
 		      If ProbeExistingServerOn(EmbedBaseURL(), modelFi.NativePath) = "none" Then Exit
@@ -636,28 +645,28 @@ Protected Module ModelManager
 		  // NB: these flags define the embedding space — changing them makes all
 		  // stored vectors incompatible (full re-embed required).
 		  //
-		  // 2 slots, not 1 (embed-phase parallelization, 2026-08-30): the
-		  // client-side embed loop (Embedder.EmbedPendingChunks) now runs up to
-		  // 2 EmbedWorker threads concurrently — with --parallel 1 the second
-		  // request queues behind the first INSIDE this server regardless of
-		  // Xojo-side threading, capping the actual throughput win. ctx-size
-		  // doubled to 16384 (2 x 8192) so each of the 2 slots keeps its
-		  // existing 8192-token budget rather than being halved. NOT verified
-		  // safe to raise further than 2 on this hardware (M1 Max, 32GB): each
-		  // parallel slot allocates its own full ctx-size KV-cache under -ngl 99
-		  // full GPU offload, and StartRerankServer's identical --parallel bump
-		  // has an existing comment noting a prior attempt to give one slot the
-		  // model's full native context crashed the server silently on launch —
-		  // the same failure mode a bigger multiply here could hit again. Only
-		  // 2 concurrent embed workers are ever spawned — no need to go higher.
+		  // Slot count sized from physical RAM (ChooseEmbedParallelCount, see
+		  // its own comment for the KV-cache math) rather than a fixed "2" —
+		  // embed-phase parallelization (2026-08-30) originally hard-coded 2
+		  // slots to match 2 client-side EmbedWorker threads (with
+		  // --parallel 1 the second request queues behind the first INSIDE
+		  // this server regardless of Xojo-side threading, capping the
+		  // actual throughput win); this generalizes that to "however many
+		  // slots this machine can safely afford." ctx-size/batch-size/
+		  // ubatch-size scale proportionally with the slot count so each
+		  // slot keeps its required 8192-token budget rather than being
+		  // divided down. Embedder.EmbedPendingChunks spawns the matching
+		  // number of EmbedWorker threads — see its own call to
+		  // ModelManager.ChooseEmbedParallelCount.
+		  Var ctxTotal As Integer = 8192 * targetParallel
 		  args.Add("--ctx-size")
-		  args.Add("16384")
+		  args.Add(ctxTotal.ToString)
 		  args.Add("--batch-size")
-		  args.Add("16384")
+		  args.Add(ctxTotal.ToString)
 		  args.Add("--ubatch-size")
-		  args.Add("16384")
+		  args.Add(ctxTotal.ToString)
 		  args.Add("--parallel")
-		  args.Add("2")
+		  args.Add(targetParallel.ToString)
 		  args.Add("--rope-scaling")
 		  args.Add("yarn")
 		  args.Add("--rope-freq-scale")
@@ -1200,6 +1209,73 @@ Protected Module ModelManager
 		  StopEmbedServer
 		  StopRerankServer
 		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function ChooseEmbedParallelCount() As Integer
+		  // Picks how many concurrent slots to launch the embedding
+		  // llama-server with, and how many EmbedWorker threads to match it
+		  // client-side — sized from the machine's actual physical RAM
+		  // instead of a fixed constant, since a hard-coded slot count is as
+		  // much a hidden hardware assumption as the static file-slicing this
+		  // codebase already moved away from for MBS parsing (see
+		  // MBSFileQueue) — just for a resource (RAM) that can't be
+		  // discovered by simply trying and retrying like a work queue can,
+		  // since llama-server's --parallel is a launch-time flag.
+		  //
+		  // nomic-embed-text-v1.5 (nomic-bert architecture: 12 layers, 768
+		  // embedding_length, no GQA) needs, per slot, at the required
+		  // 8192-token context: 2 (K+V) * 12 * 768 * 2 bytes (F16 KV cache)
+		  // * 8192 tokens = 288 MiB. Model weights are ~146MB, loaded once
+		  // regardless of slot count. This is deliberately tiny compared to
+		  // the reranker's prior silent-crash incident (Qwen3-4B at its full
+		  // 40960-token native context: ~5.76GB of KV cache alone, on a 4B-
+		  // parameter model) — that crash was a real total-memory-allocation
+		  // failure under -ngl 99 full GPU offload, not evidence that a
+		  // bigger --parallel number is inherently unsafe. Reserving a large
+		  // fixed budget for OS + other apps + the separate reranker process
+		  // (its own ~4.3GB of weights plus its own KV cache) keeps this
+		  // conservative even though the arithmetic alone would allow going
+		  // much higher.
+		  // kMaxParallel capped at 2 (2026-09-06): live-tested at 8 on a
+		  // 32GB M1 Max (the RAM budget below computes 8, the ceiling, on
+		  // that machine) — the server started and ran without error or any
+		  // "Cannot enter"/timeout failure, so the memory math and the
+		  // server itself are confirmed safe up to 8. But actual embed
+		  // throughput did NOT improve: a full cold 60,435-chunk MBS embed
+		  // at --parallel=8 tracked at the same ~3.5-5.5MB/min DB-growth
+		  // rate as both the --parallel=2 baseline (~50min total) and a
+		  // separate same-day kBatchSize=8→32 experiment (also a null
+		  // result, see project-mbs-parsing-perf memory) — projecting to
+		  // ~60min+, i.e. no better and possibly slightly worse than 2
+		  // slots. Conclusion: on this hardware, embedding throughput for
+		  // nomic-embed-text is GPU-compute-bound, not slot-count-bound or
+		  // batch-size-bound — more concurrent requests just divide the same
+		  // GPU throughput more ways. Capped back to 2 (matching the known-
+		  // good baseline) rather than deleting this function: the RAM-based
+		  // sizing logic itself is correct and verified crash-safe, so it's
+		  // kept ready for different hardware (a machine with markedly
+		  // faster GPU throughput per slot might actually benefit) or a
+		  // future llama-server version that pipelines concurrent slots more
+		  // efficiently — raise kMaxParallel again only after a live
+		  // before/after throughput comparison confirms an actual win, not
+		  // from memory-budget math alone (that part was never in question).
+		  Const kKVBytesPerSlot As Double = 288.0 * 1024 * 1024
+		  Const kReservedBytes As Double = 8.0 * 1024 * 1024 * 1024 // OS + other apps + reranker process
+		  Const kMinParallel As Integer = 2 // never regress below the already-verified-safe count
+		  Const kMaxParallel As Integer = 2 // see comment above — verified safe up to 8, but no throughput win measured past 2
+
+		  Var totalRAM As Double = SystemInformationMBS.PhysicalRAM
+		  If totalRAM <= 0 Then Return kMinParallel // couldn't determine RAM — stay on the known-safe value
+
+		  Var budget As Double = totalRAM - kReservedBytes
+		  If budget <= 0 Then Return kMinParallel
+
+		  Var n As Integer = Floor(budget / kKVBytesPerSlot)
+		  If n < kMinParallel Then Return kMinParallel
+		  If n > kMaxParallel Then Return kMaxParallel
+		  Return n
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h21

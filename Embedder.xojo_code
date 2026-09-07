@@ -192,10 +192,11 @@ Protected Module Embedder
 		  // Shared by IndexerThread and MBSIndexerThread (pass kMBSSourcePrefix
 		  // + "%" as sourceFilter for the MBS case). Single-writer queue
 		  // pipeline: one EmbedWriter owns the only DB connection used during
-		  // this phase (claims batches, writes results); 2 EmbedWorkers do
+		  // this phase (claims batches, writes results); N EmbedWorkers do
 		  // ONLY the slow HTTP EmbedBatch call, with no DB access at all,
-		  // matched to the embed server's --parallel 2 (ModelManager.
-		  // StartEmbedServer). An earlier design gave each EmbedWorker its own
+		  // matched to the embed server's --parallel slot count (both sized
+		  // by ModelManager.ChooseEmbedParallelCount from physical RAM — see
+		  // its own comment). An earlier design gave each EmbedWorker its own
 		  // connection, serialized via a shared CriticalSection — that avoided
 		  // double-processing but still hit real WAL write-lock contention
 		  // live (confirmed via "database is locked" DatabaseExceptions and
@@ -222,8 +223,9 @@ Protected Module Embedder
 		  Var workQueue As New EmbedQueue
 		  Var resultQueue As New EmbedQueue
 
+		  Var workerCount As Integer = ModelManager.ChooseEmbedParallelCount()
 		  Var workers() As EmbedWorker
-		  For w As Integer = 1 To 2
+		  For w As Integer = 1 To workerCount
 		    Var worker As New EmbedWorker
 		    worker.WorkQueue = workQueue
 		    worker.ResultQueue = resultQueue

@@ -47,11 +47,15 @@ Inherits Thread
 		      // whatever's unchanged, so resuming needs no extra state).
 		      If StopRequested Then noMoreClaims = True
 
-		      // Keep the work queue topped up so both workers always have
+		      // Keep the work queue topped up so every worker always has
 		      // something to chew on, without claiming unboundedly far ahead
 		      // (which would just move contention into "how many rows sit
-		      // claimed but unprocessed" instead of removing it).
-		      If Not noMoreClaims And WorkQueue.Count < 2 Then
+		      // claimed but unprocessed" instead of removing it). Workers.Count
+		      // matches however many EmbedWorker threads Embedder.EmbedPendingChunks
+		      // actually started (see ModelManager.ChooseEmbedParallelCount) —
+		      // this used to be a fixed "2" back when the worker count itself
+		      // was fixed.
+		      If Not noMoreClaims And WorkQueue.Count < Workers.Count Then
 		        Var ids() As Integer
 		        Var texts() As String
 		        If Embedder.ClaimPendingBatch(db, SourceFilter, Embedder.kBatchSize, ids, texts) Then
