@@ -3,7 +3,7 @@
 All notable changes to XDOX are documented here. Versions follow
 `MAJOR.MINOR.PATCH`; see `RELEASING.md` for the tagging convention.
 
-## [0.2.0] — Unreleased
+## [0.2.0] — 2026-09-19
 
 MBS Xojo Plugins documentation is now indexed and searchable alongside the
 built-in Xojo docs, plus retrieval-quality fixes surfaced while building it.
